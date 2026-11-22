@@ -138,3 +138,8 @@ code{background:#EEF0EC;padding:1px 5px;border-radius:4px;font-size:12px}
 .codebox{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:18px;font-weight:800;letter-spacing:.08em;background:var(--yellow-l);padding:8px 12px;border-radius:8px;display:inline-block}
 @media print{header.top,.banner,.noprint{display:none!important}body{background:#fff}.tw{max-height:none;overflow:visible}.card{break-inside:avoid}}
 .partyhead select{color:var(--ink)}
+/* v2: tap counters (neutral counter's voters, rep's supporters) */
+.tally{text-align:center;margin:10px 0 4px}
+.tally .tn{font-size:56px;font-weight:800;line-height:1.1;margin:4px 0}
+.tally #plus{font-size:22px;padding:20px 12px;width:100%}
+#natView button{font-size:14px;padding:9px 14px}

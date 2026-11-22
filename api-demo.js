@@ -8,6 +8,7 @@
   const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "d-" + Math.random().toString(16).slice(2));
   const day = new Date(); day.setHours(0, 0, 0, 0);
   const OPEN = 7 * 60, CLOSE = 17 * 60;
+  const END = CLOSE + 240; // simulation runs to 21:00 so the evening count can be shown
   let simMin = OPEN, speed = 5, playing = true;
   const T = (m) => new Date(day.getTime() + m * 60000).toISOString();
   const nowIso = () => T(simMin);
@@ -26,12 +27,18 @@
   });
   const stById = Object.fromEntries(stations.map((s) => [s.id, s]));
   const cOf = (sid) => stById[sid].constituency_id;
-  const lean = {}; constituencies.forEach((c) => (lean[c.id] = 0.25 + rnd() * 0.5)); // synthetic Alpha share
-  const sim = {}; stations.forEach((s) => (sim[s.id] = { rate: 0.5 + rnd() * 0.28, next: { pA: OPEN + 10 + rnd() * 50, pB: OPEN + 10 + rnd() * 50 },
-    every: 30 + rnd() * 35, last: 0, coveredBy: rnd() < 0.85 ? ["pA", "pB"] : [rnd() < 0.5 ? "pA" : "pB"] }));
+  const lean = {}; constituencies.forEach((c) => (lean[c.id] = 0.25 + rnd() * 0.5)); // synthetic Alpha share of the two-party vote
+  const indep = {}; constituencies.forEach((c) => (indep[c.id] = ["SAL", "SOU", "CLH"].includes(c.code) ? 0.08 + rnd() * 0.12 : 0)); // synthetic independent share
+  const shareOf = (p, cid) => (p === "pA" ? lean[cid] : 1 - lean[cid]) * (1 - indep[cid]);
+  const sim = {}; stations.forEach((s) => (sim[s.id] = { rate: 0.5 + rnd() * 0.28, next: { pA: OPEN + 10 + rnd() * 50, pB: OPEN + 10 + rnd() * 50, cnt: OPEN + 5 + rnd() * 15 },
+    every: 30 + rnd() * 35, cntEvery: 8 + rnd() * 8, last: 0, coveredBy: rnd() < 0.85 ? ["pA", "pB"] : [rnd() < 0.5 ? "pA" : "pB"],
+    counter: rnd() < 0.6, miss: { pA: 0.955 + rnd() * 0.04, pB: 0.955 + rnd() * 0.04 }, recog: { pA: 0.78 + rnd() * 0.3, pB: 0.78 + rnd() * 0.3 },
+    resultAt: CLOSE + 35 + rnd() * 190 }));
+  const trueVoted = (s, t) => { const x = Math.max(0, Math.min(1, (Math.min(t, CLOSE) - OPEN) / (CLOSE - OPEN))); return Math.round(s.electors_listed * sim[s.id].rate * (1 - Math.pow(1 - x, 1.7))); };
 
   const people = [
     { id: "u-rep", full_name: "Demo Rep (Alpha)", role: "rep", party_id: "pA", station: "RNO-1", email: "rep@demo" },
+    { id: "u-cnt", full_name: "Demo Neutral Counter (RNO-2)", role: "counter", party_id: null, station: "RNO-2", email: "counter@demo" },
     { id: "u-watch", full_name: "Demo Watch Room (Alpha)", role: "watch", party_id: "pA", constituency: 15, email: "watch@demo" },
     { id: "u-hq", full_name: "Demo Head Office (Alpha)", role: "hq", party_id: "pA", email: "hq@demo" },
     { id: "u-adminA", full_name: "Demo Party Admin (Alpha)", role: "party_admin", party_id: "pA", email: "admin@demo" },
@@ -39,8 +46,19 @@
     { id: "u-sys", full_name: "Demo System Admin", role: "sys_admin", party_id: null, email: "sys@demo" },
   ];
   sim["RNO-1"].manualFor = "pA";
+  sim["RNO-2"].counter = false; sim["RNO-2"].manualCounter = true; // the demo counter persona works this station by hand
+  sim["RNO-2"].coveredBy = ["pA", "pB"];
   let meId = localStorage.getItem("vw_demo_persona") || "u-rep";
-  const DB = { subs: [], recon: [], est: [], inc: [], notes: [], ratings: [], invites: [], audit: [], imports: [], keys: new Set() };
+  const DB = { subs: [], recon: [], est: [], inc: [], notes: [], ratings: [], invites: [], audit: [], imports: [], keys: new Set(), counts: [], results: [], targets: new Map(), cands: [] };
+  // synthetic expected supporters per station (some optimistic, some cautious, so weak areas appear)
+  ["pA", "pB"].forEach((p) => stations.forEach((s) => { if (rnd() < 0.92) DB.targets.set(p + "|" + s.id, Math.round(s.electors_listed * 0.66 * shareOf(p, s.constituency_id) * (0.85 + rnd() * 0.45))); }));
+  // synthetic candidates: one per party in every constituency, plus an independent in three
+  constituencies.forEach((c) => {
+    DB.cands.push({ id: "c" + c.id + "A", constituency_id: c.id, name: "Alpha candidate · " + c.code, party_id: "pA", label: null, color: "#6A3D9A", ballot_order: 1, active: true });
+    DB.cands.push({ id: "c" + c.id + "B", constituency_id: c.id, name: "Beta candidate · " + c.code, party_id: "pB", label: null, color: "#0F7C80", ballot_order: 2, active: true });
+    if (indep[c.id]) DB.cands.push({ id: "c" + c.id + "I", constituency_id: c.id, name: "Independent · " + c.code, party_id: null, label: "Independent", color: "#8C8C8C", ballot_order: 3, active: true });
+  });
+  const candAff = (c) => (c.party_id ? parties.find((p) => p.id === c.party_id)?.short_name : c.label || "Independent");
   ["pA", "pB"].forEach((p) => constituencies.forEach((c) => {
     const l = p === "pA" ? lean[c.id] : 1 - lean[c.id];
     const r = l > 0.62 ? "stronghold" : l > 0.52 ? "leaning" : l > 0.45 ? "competitive" : l > 0.36 ? "opponent_leaning" : "opponent_stronghold";
@@ -82,21 +100,31 @@
   const latestGood = (p, sid) => latest(p, sid, (st) => st === "unverified" || st === "reconciled");
   const latestRec = (p, sid) => latest(p, sid, (st) => st === "reconciled");
   const latestEst = (p, sid) => { for (let i = DB.est.length - 1; i >= 0; i--) if (DB.est[i].party_id === p && DB.est[i].station_id === sid) return DB.est[i]; return null; };
-  const canSeeStation = (sid) => { const u = me(); if (!u || !u.party_id) return false; if (u.role === "hq" || u.role === "party_admin") return true;
+  const canSeeStation = (sid) => { const u = me(); if (u?.role === "counter") return u.station === sid; if (!u || !u.party_id) return false; if (u.role === "hq" || u.role === "party_admin") return true;
     if (u.role === "watch") return cOf(sid) === u.constituency; return u.station === sid; };
   const canSeeC = (cid) => { const u = me(); return u.role === "hq" || u.role === "party_admin" || (u.role === "watch" && u.constituency === cid); };
   const deny = (m) => { throw new Error(m || "Not permitted"); };
 
+  const notSup = (arr, x) => !arr.some((y) => y.corrects_id === x.id);
+  function neutral(sid) { let best = null; DB.counts.forEach((c) => { if (c.station_id !== sid || !notSup(DB.counts, c)) return;
+      if (!best || (c.source === "official") > (best.source === "official") || ((c.source === "official") === (best.source === "official") && c.received_at >= best.received_at)) best = c; }); return best; }
+  const PRI = { official: 3, counter: 2, party: 1 };
+  function latestResult(sid) { let best = null; DB.results.forEach((r) => { if (r.station_id !== sid || !notSup(DB.results, r)) return;
+      if (r.party_id && !parties.find((p) => p.id === r.party_id)?.share_counts) return;
+      if (!best || PRI[r.source] > PRI[best.source] || (PRI[r.source] === PRI[best.source] && r.received_at >= best.received_at)) best = r; }); return best; }
   function natStation(s) {
     const sharing = parties.filter((p) => p.share_counts);
     const goods = sharing.map((p) => ({ p, g: latestGood(p.id, s.id) })).filter((x) => x.g);
-    goods.sort((a, b) => b.g.received_at.localeCompare(a.g.received_at));
-    const recs = sharing.map((p) => latestRec(p.id, s.id)).filter(Boolean).sort((a, b) => b.received_at.localeCompare(a.received_at));
+    const n = neutral(s.id), pmax = goods.length ? Math.max(...goods.map((x) => x.g.attendance)) : null;
+    const plast = goods.length ? goods.map((x) => x.g.received_at).sort().slice(-1)[0] : null;
     const recent = goods.filter((x) => simMin - minOf(x.g.received_at) <= 45).map((x) => x.g.attendance);
-    const dis = recent.length > 1 && Math.max(...recent) - Math.min(...recent) > 0.1 * Math.max(...recent, 1);
+    if (n && simMin - minOf(n.received_at) <= 45) recent.push(n.voted);
+    const voted = n ? n.voted : pmax;
     return { station_id: s.id, official_code: s.official_code, station_name: s.name, district: s.district, constituency_id: s.constituency_id,
-      electors_listed: s.electors_listed, observed: goods[0]?.g.attendance ?? null, reconciled: recs[0]?.attendance ?? null,
-      last_at: goods[0]?.g.received_at ?? null, sources: goods.length ? goods.map((x) => x.p.short_name) : null, disagreement: dis };
+      electors_listed: s.electors_listed, voted, source: n ? n.source : pmax !== null ? "party" : null, last_at: n ? n.received_at : plast,
+      party_figures: goods.length ? goods.map((x) => ({ party: x.p.short_name, color: x.p.color, attendance: x.g.attendance, at: x.g.received_at })).sort((a, b) => a.party.localeCompare(b.party)) : null,
+      over_list: voted !== null && voted > s.electors_listed,
+      disagreement: recent.length > 1 && Math.max(...recent) - Math.min(...recent) > 0.1 * Math.max(...recent, 1) };
   }
   const minOf = (iso) => (new Date(iso) - day) / 60000;
 
@@ -122,27 +150,59 @@
 
   // ---- simulation ----
   const INC = ["Station opened late", "Long queue outside", "Representative refused entry", "Power outage", "Access problem for elderly voters", "Crowd concern near station"];
+  function addCount(sid, user, voted, source, extra = {}) {
+    const s = stById[sid], flags = voted > s.electors_listed ? ["Higher than electors on list (" + s.electors_listed + ")"] : [];
+    const c = { id: nextId++, station_id: sid, user_id: user, client_key: extra.key || uid(), source, kind: extra.corrects_id ? "correction" : "report", voted,
+      corrects_id: extra.corrects_id || null, reason: extra.reason || null, note: extra.note || null, flags, received_at: nowIso() };
+    DB.counts.push(c); return c;
+  }
+  function addResult(sid, user, votes, rejected, source, extra = {}) {
+    const s = stById[sid], tot = Object.values(votes).reduce((a, v) => a + v, 0) + rejected, nv = natStation(s).voted, flags = [];
+    if (tot > s.electors_listed) flags.push("More ballots than electors on list (" + s.electors_listed + ")");
+    if (nv !== null && tot > nv) flags.push("More ballots than voters recorded today (" + nv + ")");
+    if (extra.party_id) { const other = DB.results.filter((x) => x.station_id === sid && x.source === "party" && x.party_id !== extra.party_id && notSup(DB.results, x)).slice(-1)[0];
+      if (other && (other.rejected !== rejected || Object.keys(votes).some((k) => other.votes[k] !== votes[k]))) flags.push("Differs from another party's count for this station"); }
+    const r = { id: nextId++, station_id: sid, user_id: user, client_key: extra.key || uid(), source, party_id: extra.party_id || null, kind: extra.corrects_id ? "correction" : "report", votes, rejected,
+      total_ballots: tot, corrects_id: extra.corrects_id || null, reason: extra.reason || null, flags, received_at: nowIso() };
+    DB.results.push(r); return r;
+  }
   function tick(dm) {
-    simMin = Math.min(CLOSE + 40, simMin + dm);
+    simMin = Math.min(END, simMin + dm);
     stations.forEach((s) => {
       const z = sim[s.id];
+      // neutral counter: the true running total, sent every 8-16 minutes
+      if (z.counter) while (z.next.cnt <= simMin && z.next.cnt <= CLOSE + 10) {
+        const t = z.next.cnt, save = simMin; simMin = t; addCount(s.id, "sim-counter", trueVoted(s, t), "counter"); simMin = save; z.next.cnt += z.cntEvery;
+      }
+      // party agents: their own count (they miss a few people) + supporters they recognise
       z.coveredBy.forEach((p) => {
         if (z.manualFor === p) return;
         while (z.next[p] <= simMin && z.next[p] <= CLOSE + 25) {
-          const t = z.next[p], x = Math.min(1, (Math.min(t, CLOSE) - OPEN) / (CLOSE - OPEN));
-          let v = Math.round(s.electors_listed * z.rate * (1 - Math.pow(1 - x, 1.7)) * (0.96 + Math.random() * 0.08));
+          const t = z.next[p];
+          let v = Math.round(trueVoted(s, t) * z.miss[p] * (0.98 + Math.random() * 0.03));
           const prev = latestEff(p, s.id); if (prev) v = Math.max(v, prev.attendance);
           if (prev && Math.random() < 0.02) v = Math.round(prev.attendance * 0.6);
           const save = simMin; simMin = t;
           const r = addSub(p, s.id, "sim", uid(), v);
-          const share = p === "pA" ? lean[s.constituency_id] : 1 - lean[s.constituency_id];
-          DB.est.push({ id: nextId++, party_id: p, station_id: s.id, user_id: "sim", client_key: uid(), estimated_supporters: Math.round(v * share * (0.85 + Math.random() * 0.3)),
+          DB.est.push({ id: nextId++, party_id: p, station_id: s.id, user_id: "sim", client_key: uid(), estimated_supporters: Math.round(trueVoted(s, t) * shareOf(p, s.constituency_id) * z.recog[p]),
             confidence: ["low", "medium", "high"][Math.floor(Math.random() * 3)], received_at: nowIso() });
           simMin = save;
           if (!r.flags?.length && Math.random() < 0.85) DB.recon.push({ submission_id: r.id, party_id: p, decision: "reconciled", by_user: "sim", at: T(t + 20 + Math.random() * 30), _due: t + 20 + Math.random() * 30 });
           z.next[p] += z.every + (Math.random() * 14 - 7);
         }
       });
+      // evening count: each station's counter sends the totals between 17:35 and 20:45
+      if ((z.counter || z.coveredBy.length) && !z.manualCounter && !z.resultSent && z.resultAt <= simMin) {
+        z.resultSent = true; const save = simMin; simMin = Math.max(z.resultAt, CLOSE + 1);
+        const total = trueVoted(s, CLOSE), rejected = Math.round(total * (0.006 + Math.random() * 0.014)), valid = total - rejected, cid = s.constituency_id;
+        const cs = DB.cands.filter((c) => c.constituency_id === cid && c.active), votes = {}; let left = valid;
+        const wA = Math.max(0.05, Math.min(0.95, lean[cid] + (Math.random() * 0.16 - 0.08))) * (1 - indep[cid]);
+        cs.forEach((c, i) => { const w = c.party_id === "pA" ? wA : c.party_id === "pB" ? (1 - indep[cid]) - wA : indep[cid];
+          const v = i === cs.length - 1 ? left : Math.min(left, Math.round(valid * w)); votes[c.id] = v; left -= v; });
+        if (z.counter) addResult(s.id, "sim-counter", votes, rejected, "counter");
+        else { const p = z.coveredBy.find((q) => z.manualFor !== q); if (p) addResult(s.id, "sim", votes, rejected, "party", { party_id: p }); }
+        simMin = save;
+      }
     });
     if (simMin <= CLOSE && Math.random() < dm * 0.01) {
       const s = stations[Math.floor(Math.random() * stations.length)], p = Math.random() < 0.5 ? "pA" : "pB";
@@ -155,7 +215,7 @@
   let last = performance.now(), acc = 0;
   setInterval(() => {
     const n = performance.now(), dt = (n - last) / 1000; last = n;
-    if (!playing || simMin >= CLOSE + 40) return;
+    if (!playing || simMin >= END) return;
     acc += dt * speed; if (acc >= 1) { const m = Math.floor(acc); acc -= m; tick(m); listeners.forEach((f) => f("tick")); }
   }, 250);
   tick(0);
@@ -169,7 +229,7 @@
       setPersona(id) { meId = id; localStorage.setItem("vw_demo_persona", id); listeners.forEach((f) => f("auth")); },
       get playing() { return playing; }, toggle() { playing = !playing; return playing; },
       setSpeed(s) { speed = s; }, get speed() { return speed; },
-      jump(m) { while (simMin < Math.min(m, CLOSE + 40)) tick(5); listeners.forEach((f) => f("tick")); },
+      jump(m) { while (simMin < Math.min(m, END)) tick(5); listeners.forEach((f) => f("tick")); },
     },
     async init() {},
     onChange(cb) { listeners.push(cb); },
@@ -177,7 +237,7 @@
     async signIn() {}, async signUp() { return { needsConfirm: false }; }, async signOut() {}, async resetPassword() {}, async updatePassword() {},
     async me() {
       const u = me(); if (!u) return null;
-      return R({ id: u.id, email: u.email, full_name: u.full_name, role: u.role, party: party() || null,
+      return R({ id: u.id, email: u.email, full_name: u.full_name, role: u.role, party: party() || null, active: u.active !== false,
         stations: u.station ? [stById[u.station]] : [], constituencies: u.constituency ? [u.constituency] : [] });
     },
     async redeem() { deny("Invites are not used in demo mode"); },
@@ -187,26 +247,67 @@
       const ns = stations.map(natStation);
       return R(constituencies.map((c) => {
         const xs = ns.filter((n) => n.constituency_id === c.id);
-        return { constituency_id: c.id, code: c.code, name: c.name, stations_total: xs.length, stations_reporting: xs.filter((x) => x.observed !== null).length,
-          observed: xs.reduce((a, x) => a + (x.observed || 0), 0), reconciled: xs.reduce((a, x) => a + (x.reconciled || 0), 0),
-          electors_listed: xs.reduce((a, x) => a + x.electors_listed, 0), last_at: xs.map((x) => x.last_at).filter(Boolean).sort().slice(-1)[0] || null,
-          disagreements: xs.filter((x) => x.disagreement).length,
+        return { constituency_id: c.id, code: c.code, name: c.name, stations_total: xs.length, stations_reporting: xs.filter((x) => x.voted !== null).length,
+          voted: xs.reduce((a, x) => a + (x.voted || 0), 0), electors_listed: xs.reduce((a, x) => a + x.electors_listed, 0),
+          from_counter: xs.filter((x) => x.source === "counter" || x.source === "official").length, from_party: xs.filter((x) => x.source === "party").length,
+          last_at: xs.map((x) => x.last_at).filter(Boolean).sort().slice(-1)[0] || null,
+          over_list: xs.filter((x) => x.over_list).length, disagreements: xs.filter((x) => x.disagreement).length,
           shared_incidents: DB.inc.filter((i) => i.status === "open" && cOf(i.station_id) === c.id && parties.find((p) => p.id === i.party_id).share_incidents).length };
-      }));
+      }).sort((a, b) => a.name.localeCompare(b.name)));
     },
-    nationalStations: (cid) => R(stations.filter((s) => s.constituency_id === cid).map(natStation)),
+    nationalStations: (cid) => R(stations.filter((s) => !cid || s.constituency_id === cid).map(natStation)),
     nationalTimeline() {
       const sharing = new Set(parties.filter((p) => p.share_counts).map((p) => p.id));
-      const xs = DB.subs.filter((x) => sharing.has(x.party_id)).map((x) => ({ x, st: status(x), m: minOf(x.received_at) }))
-        .filter((z) => z.st === "unverified" || z.st === "reconciled").sort((a, b) => a.m - b.m);
-      const obs = new Map(), rec = new Map(), out = []; let i = 0;
-      for (let m = OPEN - 30; m <= simMin + 15; m += 15) {
-        while (i < xs.length && xs[i].m <= m) { const z = xs[i++]; obs.set(z.x.station_id, z.x.attendance); if (z.st === "reconciled") rec.set(z.x.station_id, z.x.attendance); }
-        let o = 0, r = 0; obs.forEach((v) => (o += v)); rec.forEach((v) => (r += v));
-        out.push({ t: T(m), observed: o, reconciled: r });
+      const ev = [];
+      DB.counts.filter((c) => notSup(DB.counts, c)).forEach((c) => ev.push({ m: minOf(c.received_at), sid: c.station_id, k: c.source === "official" ? "off" : "cnt", v: c.voted }));
+      DB.subs.filter((x) => sharing.has(x.party_id)).forEach((x) => { const st = status(x); if (st === "unverified" || st === "reconciled") ev.push({ m: minOf(x.received_at), sid: x.station_id, k: x.party_id, v: x.attendance }); });
+      ev.sort((a, b) => a.m - b.m);
+      const cur = {}, out = []; let i = 0;
+      for (let m = OPEN - 30; m <= Math.min(simMin, CLOSE + 60) + 15; m += 15) {
+        while (i < ev.length && ev[i].m <= m) { const e = ev[i++]; (cur[e.sid] = cur[e.sid] || {})[e.k] = e.v; }
+        let t = 0; Object.values(cur).forEach((o) => { const parts = Object.entries(o).filter(([k]) => k !== "off" && k !== "cnt").map(([, v]) => v);
+          t += o.off ?? o.cnt ?? (parts.length ? Math.max(...parts) : 0); });
+        out.push({ t: T(m), voted: t });
       }
       return R(out);
     },
+    nationalResults() {
+      return R(constituencies.map((c) => {
+        const xs = stations.filter((s) => s.constituency_id === c.id), lr = xs.map((s) => latestResult(s.id)).filter(Boolean);
+        const cs = DB.cands.filter((x) => x.constituency_id === c.id && x.active).map((x) => ({ id: x.id, name: x.name, party: candAff(x), party_id: x.party_id, color: x.color, ballot_order: x.ballot_order,
+          votes: lr.reduce((a, r) => a + (r.votes[x.id] || 0), 0) })).sort((a, b) => b.votes - a.votes || a.ballot_order - b.ballot_order);
+        return { constituency_id: c.id, code: c.code, name: c.name, stations_total: xs.length, stations_counted: lr.length, ballots: lr.reduce((a, r) => a + r.total_ballots, 0),
+          rejected: lr.reduce((a, r) => a + r.rejected, 0), candidates: cs, last_at: lr.map((r) => r.received_at).sort().slice(-1)[0] || null, flagged: lr.filter((r) => r.flags.length).length };
+      }).sort((a, b) => a.name.localeCompare(b.name)));
+    },
+    nationalStationResults(cid) {
+      return R(stations.filter((s) => s.constituency_id === cid).map((s) => { const n = natStation(s), r = latestResult(s.id);
+        return { station_id: s.id, official_code: s.official_code, station_name: s.name, electors_listed: s.electors_listed, voted: n.voted,
+          source: r?.source ?? null, votes: r?.votes ?? null, rejected: r?.rejected ?? null, total_ballots: r?.total_ballots ?? null, received_at: r?.received_at ?? null, flags: r?.flags ?? null }; }));
+    },
+    candidates(cid, all) { return R(DB.cands.filter((c) => (!cid || c.constituency_id === cid) && (all || c.active)).map((c) => ({ ...c, party: candAff(c) })).sort((a, b) => a.ballot_order - b.ballot_order)); },
+    async addCandidate(x) { if (me().role !== "sys_admin") deny(); const p = parties.find((q) => q.id === x.party);
+      const c = { id: "c" + nextId++, constituency_id: x.constituency, name: x.name, party_id: x.party || null, label: x.party ? null : x.label || "Independent", color: x.color || p?.color || "#777777", ballot_order: x.order || 9, active: true };
+      DB.cands.push(c); audit("add_candidate", "candidate", c.id); return c.id; },
+    async setCandidateActive(id, a) { if (me().role !== "sys_admin") deny(); const c = DB.cands.find((x) => x.id === id); if (c) c.active = a; },
+    async submitCount(x) { const u = me(), src = u.role === "counter" && u.station === x.station ? "counter" : u.role === "sys_admin" ? "official" : deny("Only the neutral counter for this station (or a system administrator) can do this");
+      const k = "cnt|" + x.key; if (DB.keys.has(k)) return R({ duplicate: true }); DB.keys.add(k);
+      const c = addCount(x.station, u.id, x.voted, src, { key: x.key, note: x.note }); audit("submit_count", "station_count", c.id); return R({ duplicate: false, id: c.id, received_at: c.received_at, flags: c.flags }); },
+    async correctCount(x) { const u = me(), o = DB.counts.find((c) => c.id === x.original); if (!o || o.user_id !== u.id) deny("You can only correct your own figures");
+      if (!x.reason || x.reason.trim().length < 3) deny("A reason is required"); if (DB.counts.some((c) => c.corrects_id === o.id)) deny("This figure was already corrected; correct the latest version");
+      const c = addCount(o.station_id, u.id, x.voted, o.source, { key: x.key, corrects_id: o.id, reason: x.reason.trim() }); audit("correct_count", "station_count", c.id); return R({ duplicate: false, id: c.id, received_at: c.received_at, flags: c.flags }); },
+    async submitResults(x) { const u = me(), src = u.role === "counter" && u.station === x.station ? "counter" : u.role === "rep" && u.station === x.station ? "party" : u.role === "sys_admin" ? "official" : deny("Only someone assigned to this station (or a system administrator) can do this");
+      const k = "res|" + x.key; if (DB.keys.has(k)) return R({ duplicate: true }); DB.keys.add(k);
+      const cid = stById[x.station].constituency_id, cs = DB.cands.filter((c) => c.constituency_id === cid && c.active);
+      if (!cs.length) deny("No candidates have been entered for this constituency yet");
+      if (cs.some((c) => !(x.votes[c.id] >= 0))) deny("Enter a number for every candidate (0 if none)");
+      if (x.corrects) { const o = DB.results.find((r) => r.id === x.corrects); if (!o || o.user_id !== u.id) deny("You can only correct your own results"); if (!x.reason || x.reason.length < 3) deny("A reason is required"); }
+      const r = addResult(x.station, u.id, x.votes, x.rejected, src, { key: x.key, corrects_id: x.corrects || null, reason: x.reason, party_id: src === "party" ? u.party_id : null }); audit("submit_results", "station_result", r.id);
+      return R({ duplicate: false, id: r.id, received_at: r.received_at, flags: r.flags }); },
+    myCounts(sid) { const u = me(), mine = (x) => x.station_id === sid && (u.role === "sys_admin" || x.user_id === u.id);
+      return R({ counts: DB.counts.filter(mine).reverse().map((c) => ({ ...c, superseded: !notSup(DB.counts, c) })), results: DB.results.filter(mine).reverse().map((r) => ({ ...r, superseded: !notSup(DB.results, r) })) }); },
+    async setTarget(sid, n) { const u = me(); if (!["hq", "party_admin", "watch"].includes(u.role) || !canSeeStation(sid)) deny(); const k = u.party_id + "|" + sid; n === null ? DB.targets.delete(k) : DB.targets.set(k, n); audit("set_expected", "station", sid); },
+    async myTarget(sid) { const u = me(); if (!u.party_id || !canSeeStation(sid)) return null; return DB.targets.get(u.party_id + "|" + sid) ?? null; },
     partySummary() {
       const u = me(); if (!u.party_id || !["hq", "party_admin", "watch"].includes(u.role)) deny();
       const p = u.party_id;
@@ -217,17 +318,19 @@
           est_supporters: xs.reduce((a, s) => a + (latestEst(p, s.id)?.estimated_supporters || 0), 0), electors_listed: xs.reduce((a, s) => a + s.electors_listed, 0),
           open_alerts: DB.inc.filter((i) => i.party_id === p && i.status === "open" && cOf(i.station_id) === c.id).length,
           last_at: xs.map((s) => latestEff(p, s.id)?.received_at).filter(Boolean).sort().slice(-1)[0] || null,
-          rating: u.role === "watch" ? null : (DB.ratings.find((r) => r.party_id === p && r.constituency_id === c.id) || {}).rating || null };
+          rating: u.role === "watch" ? null : (DB.ratings.find((r) => r.party_id === p && r.constituency_id === c.id) || {}).rating || null,
+          voted: xs.reduce((a, s) => a + (natStation(s).voted || 0), 0), expected: xs.reduce((a, s) => a + (DB.targets.get(p + "|" + s.id) || 0), 0) };
       }));
     },
     partyStations(cid) {
-      if (!canSeeC(cid)) deny(); const p = me().party_id;
-      return R(stations.filter((s) => s.constituency_id === cid).map((s) => {
-        const l = latestEff(p, s.id), e = latestEst(p, s.id);
-        return { station_id: s.id, official_code: s.official_code, station_name: s.name, district: s.district, electors_listed: s.electors_listed,
+      const u = me(); if (!u.party_id || (cid ? !canSeeC(cid) : !["hq", "party_admin"].includes(u.role))) deny(); const p = u.party_id;
+      return R(stations.filter((s) => !cid || s.constituency_id === cid).map((s) => {
+        const l = latestEff(p, s.id), e = latestEst(p, s.id), n = natStation(s);
+        return { station_id: s.id, official_code: s.official_code, station_name: s.name, district: s.district, constituency_id: s.constituency_id, electors_listed: s.electors_listed,
           latest_id: l?.id ?? null, latest_attendance: l?.attendance ?? null, latest_at: l?.received_at ?? null, latest_status: l?.status ?? null,
           latest_flags: l?.flags ?? null, latest_kind: l?.kind ?? null, reconciled: latestRec(p, s.id)?.attendance ?? null,
-          est_supporters: e?.estimated_supporters ?? null, est_confidence: e?.confidence ?? null, est_at: e?.received_at ?? null, reps: sim[s.id].coveredBy.includes(p) ? 1 : 0 };
+          est_supporters: e?.estimated_supporters ?? null, est_confidence: e?.confidence ?? null, est_at: e?.received_at ?? null, reps: sim[s.id].coveredBy.includes(p) ? 1 : 0,
+          voted: n.voted, voted_source: n.source, expected: DB.targets.get(p + "|" + s.id) ?? null };
       }));
     },
     subLog(cid) { const p = me().party_id; return R(DB.subs.filter((s) => s.party_id === p && cOf(s.station_id) === cid && canSeeStation(s.station_id)).slice(-80).reverse().map(withStatus)); },
@@ -267,12 +370,12 @@
       const r = DB.ratings.find((x) => x.party_id === u.party_id && x.constituency_id === cid); if (r) { r.rating = rating; r.note = note; } else DB.ratings.push({ party_id: u.party_id, constituency_id: cid, rating, note }); },
     async setSharing(c, i) { const u = me(); if (u.role !== "party_admin") deny("Only the party administrator can change sharing"); Object.assign(party(), { share_counts: c, share_incidents: i }); audit("set_sharing", "party", u.party_id, { counts: c, incidents: i }); },
     async createInvite(x) { const u = me(); const code = Math.random().toString(16).slice(2, 6).toUpperCase() + "-" + Math.random().toString(16).slice(2, 6).toUpperCase() + "-" + Math.random().toString(16).slice(2, 6).toUpperCase();
-      if (x.role === "rep" && !x.station) deny("A representative invite needs a polling station"); if (x.role === "watch" && !x.constituency) deny("A watch room invite needs a constituency");
+      if ((x.role === "rep" || x.role === "counter") && !x.station) deny("This invite needs a polling station"); if (x.role === "watch" && !x.constituency) deny("A watch room invite needs a constituency");
       DB.invites.push({ code, party_id: u.role === "sys_admin" ? x.party || null : u.party_id, role: x.role, station_id: x.station || null, constituency_id: x.constituency || null, label: x.label, created_at: nowIso(), expires_at: T(simMin + 14 * 1440), used_by: null, revoked: false });
       audit("create_invite", "invite", code, { role: x.role }); return code; },
-    invites() { const u = me(); return R(DB.invites.filter((i) => (u.role === "party_admin" && i.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin"].includes(i.role))).slice().reverse()); },
+    invites() { const u = me(); return R(DB.invites.filter((i) => (u.role === "party_admin" && i.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter"].includes(i.role))).slice().reverse()); },
     async revokeInvite(code) { const i = DB.invites.find((x) => x.code === code); if (i) i.revoked = true; },
-    members() { const u = me(); return R(people.filter((p) => (u.role === "party_admin" && p.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin"].includes(p.role)))
+    members() { const u = me(); return R(people.filter((p) => (u.role === "party_admin" && p.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter"].includes(p.role)))
       .map((p) => ({ id: p.id, full_name: p.full_name, role: p.role, active: p.active !== false, party_id: p.party_id, assignments: [p.station ? { station_id: p.station } : null, p.constituency ? { constituency_id: p.constituency } : null].filter(Boolean) }))); },
     async setMemberActive(id, a) { if (id === meId) deny("You cannot deactivate yourself"); const p = people.find((x) => x.id === id); if (p) p.active = a; },
     audit() { const u = me(); return R(DB.audit.filter((a) => (u.role === "party_admin" && a.party_id === u.party_id) || (u.role === "sys_admin" && !a.party_id)).slice(-200).reverse()); },

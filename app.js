@@ -9,10 +9,16 @@ const pct = (a, b) => (b ? ((a / b) * 100).toFixed(0) + "%" : "—");
 const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—");
 const mins = (iso) => (iso ? (API.now() - new Date(iso)) / 60000 : Infinity);
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : "k" + Date.now() + Math.random().toString(16).slice(2));
+// tap counters are kept on the phone so a tap is never lost; the running total is what gets sent
+const tallyKey = (kind, sid) => `vw_tally_${kind}_${ME?.id}_${sid}`;
+const tallyGet = (kind, sid) => { try { return JSON.parse(localStorage.getItem(tallyKey(kind, sid))) || { n: 0 }; } catch { return { n: 0 }; } };
+const tallySet = (kind, sid, v) => localStorage.setItem(tallyKey(kind, sid), JSON.stringify(v));
+// the same total always goes with the same key, so sending it twice is recognised as a duplicate and never counted twice
+const tallySendKey = (kind, sid, T) => { if (T.keyFor !== T.n || !T.key) { T.key = newKey(); T.keyFor = T.n; tallySet(kind, sid, T); } return T.key; };
 function toast(msg, err) { const t = $("#toast"); t.textContent = msg; t.classList.toggle("err", !!err); t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), err ? 5000 : 3000); }
 async function guard(fn, okMsg) { try { const r = await fn(); if (okMsg) toast(okMsg); return r; } catch (e) { toast(e.message || String(e), true); return undefined; } }
 
-const ROLE = { rep: "Station representative", watch: "Watch room", hq: "Head office", party_admin: "Party administrator", sys_admin: "System administrator" };
+const ROLE = { rep: "Station representative", watch: "Watch room", hq: "Head office", party_admin: "Party administrator", sys_admin: "System administrator", counter: "Neutral station counter" };
 const RATINGS = [
   ["stronghold", "Our stronghold", 1], ["leaning", "Leaning our way", 0.6], ["competitive", "Competitive", 0],
   ["opponent_leaning", "Leaning to opponents", -0.6], ["opponent_stronghold", "Opponents' stronghold", -1], ["unrated", "Not rated", null],
@@ -24,6 +30,11 @@ const PARTY_PRESETS = [
   ["Dominica Freedom Party", "DFP", "#1B7F3B", "green"],
   ["United Progressive Party", "UPP", "#E8740C", "orange"],
 ];
+const JOBS = { inside: { short: "inside: live count", long: "INSIDE the station: tap +1 for every person who votes" },
+  outside: { short: "outside: our supporters", long: "OUTSIDE the station: tap +1 for every supporter of ours you recognise going in" },
+  both: { short: "inside + outside", long: "live count of all voters AND our supporters" } };
+// the job travels in the invite link and is remembered on the rep's phone; it only decides which screen opens first
+(() => { const j = (location.hash.match(/job=(inside|outside|both)/) || [])[1]; if (j) localStorage.setItem("vw_job", j); })();
 const INCIDENT_CATS = ["Station opened late", "Long queue / delays", "Representative refused entry", "Power or lighting problem", "Access problem for elderly or disabled voters", "Crowd or security concern", "Count does not match station records", "Other"];
 let ME = null, CONSTS = [], VIEW = null, REFRESH = null, SEL = { c: null, natC: null, hqMode: "rating", natMode: "obs", repTab: "turnout", repStation: null };
 const cName = (id) => (CONSTS.find((c) => c.id === id) || {}).name || "—";
@@ -34,7 +45,8 @@ const online = () => navigator.onLine && !window.VW_FORCE_OFFLINE;
 const OB_KEY = () => "vw_outbox_" + (ME?.id || "x");
 const outbox = { get: () => { try { return JSON.parse(localStorage.getItem(OB_KEY()) || "[]"); } catch { return []; } }, set: (v) => localStorage.setItem(OB_KEY(), JSON.stringify(v)) };
 const isNetErr = (e) => !online() || /failed to fetch|networkerror|load failed|network request failed|fetch/i.test(e?.message || "");
-const SENDERS = { attendance: (x) => API.submitAttendance(x), correction: (x) => API.submitCorrection(x), estimate: (x) => API.submitEstimate(x), incident: (x) => API.reportIncident(x) };
+const SENDERS = { attendance: (x) => API.submitAttendance(x), correction: (x) => API.submitCorrection(x), estimate: (x) => API.submitEstimate(x), incident: (x) => API.reportIncident(x),
+  count: (x) => API.submitCount(x), countCorrection: (x) => API.correctCount(x), results: (x) => API.submitResults(x) };
 async function send(kind, payload) {
   const item = { kind, payload: { ...payload, device_time: payload.device_time || API.now().toISOString() }, queued_at: new Date().toISOString() };
   if (!online()) { queue(item); return { queued: true }; }
@@ -64,7 +76,7 @@ function paintNet() {
 }
 
 // ------------------------------------------------------------------ map
-const SMALL = new Set(["RCE", "RNO", "RSO", "RVA", "MJR"]);
+const SMALL = new Set(["RCE"]); // Roseau Central is the only constituency too small for a name on the map
 const PURPLE = ["#F1ECF6", "#DDCFEA", "#C9B3DE", "#B194CE", "#9A76BE", "#845DAF", "#6E46A0", "#56317F", "#3E1C61"];
 const ramp = (f) => PURPLE[Math.max(0, Math.min(PURPLE.length - 1, Math.round(f * (PURPLE.length - 1))))];
 function hexMix(hex, w) { const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255, m = (x) => Math.round(x * w + 255 * (1 - w)); return `rgb(${m(r)},${m(g)},${m(b)})`; }
@@ -81,7 +93,7 @@ function mapSVG(id) {
   });
   s += `<g transform="translate(${x + w - 40},${y + 40})"><circle r="16" fill="#fff" stroke="#FCD116" stroke-width="2"/><path d="M0 -11 L5 4 L0 0 L-5 4Z" fill="#111"/><text y="-20" text-anchor="middle" font-size="11" font-weight="800">N</text></g>`;
   s += `<text x="${x + 12}" y="${y + h - 12}" font-size="11" fill="#5E6762">Caribbean Sea</text><text x="${x + w - 12}" y="${y + h - 12}" font-size="11" fill="#5E6762" text-anchor="end">Atlantic Ocean</text>`;
-  s += `<text x="${x + 12}" y="${y + 18}" font-size="10.5" fill="#5E6762">Roseau area: small labels — hover or tap</text></svg>`;
+  s += `<text x="${x + 12}" y="${y + 18}" font-size="10.5" fill="#5E6762">Roseau Central: hover or tap the small area by Roseau</text></svg>`;
   return s;
 }
 const prevVals = {};
@@ -110,15 +122,15 @@ function timeline(el, rows) {
   const W = 560, H = 190, P = { l: 44, r: 10, t: 10, b: 22 };
   if (!rows.length) { el.innerHTML = '<p class="muted small">No data yet.</p>'; return; }
   const t0 = new Date(rows[0].t).getTime(), t1 = Math.max(new Date(rows[rows.length - 1].t).getTime(), t0 + 3600e3);
-  const maxY = Math.max(100, ...rows.map((r) => +r.observed)) * 1.1;
+  const maxY = Math.max(100, ...rows.map((r) => +r.voted)) * 1.1;
   const X = (t) => P.l + ((new Date(t).getTime() - t0) / (t1 - t0)) * (W - P.l - P.r), Y = (v) => H - P.b - (v / maxY) * (H - P.t - P.b);
   let g = `<svg viewBox="0 0 ${W} ${H}" width="100%">`;
   for (let i = 0; i <= 4; i++) { const v = (maxY * i) / 4; g += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="#ECEFEA"/><text x="${P.l - 6}" y="${Y(v) + 4}" font-size="10" fill="#5E6762" text-anchor="end">${v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k" : Math.round(v)}</text>`; }
   const step = Math.max(1, Math.ceil(rows.length / 6));
   rows.forEach((r, i) => { if (i % step === 0) g += `<text x="${X(r.t)}" y="${H - 5}" font-size="10" fill="#5E6762" text-anchor="middle">${hhmm(r.t)}</text>`; });
   const line = (k) => rows.map((r, i) => (i ? "L" : "M") + X(r.t).toFixed(1) + "," + Y(+r[k]).toFixed(1)).join("");
-  g += `<path d="${line("observed")}" fill="none" stroke="#5B2A86" stroke-width="2.6"/><path d="${line("reconciled")}" fill="none" stroke="#006B3F" stroke-width="2.6" stroke-dasharray="5 3"/></svg>`;
-  el.innerHTML = g + `<div class="legend"><span class="lg"><i style="background:#5B2A86"></i>Observed (unverified)</span><span class="lg"><i style="background:#006B3F"></i>Reconciled</span></div>`;
+  g += `<path d="${line("voted")}" fill="none" stroke="#5B2A86" stroke-width="2.6"/></svg>`;
+  el.innerHTML = g + `<div class="legend"><span class="lg"><i style="background:#5B2A86"></i>People voted (one figure per station)</span></div>`;
 }
 function csv(name, rows) {
   const q = (v) => (/[",\n]/.test(String(v ?? "")) ? '"' + String(v).replace(/"/g, '""') + '"' : v ?? "");
@@ -135,7 +147,8 @@ function tabsFor(role) {
   return { rep: [["station", "L1", "My station"], nat], watch: [["watch", "L2", "Watch room"], nat],
     hq: [["hq", "L3", "Head office"], ["watch", "L2", "Watch rooms"], nat],
     party_admin: [["hq", "L3", "Head office"], ["watch", "L2", "Watch rooms"], nat, ["team", "ADM", "Team & sharing"]],
-    sys_admin: [["admin", "SYS", "System admin"], nat] }[role] || [];
+    counter: [["counter", "L1", "My station count"], nat],
+    sys_admin: [["admin", "SYS", "System admin"], ["count", "CNT", "Counters & results"], nat] }[role] || [];
 }
 function paintShell() {
   const party = ME?.party;
@@ -146,16 +159,16 @@ function paintShell() {
   $("#signOut") && ($("#signOut").onclick = async () => { await API.signOut(); location.reload(); });
   $("#tabs").innerHTML = ME?.role ? tabsFor(ME.role).map(([v, k, l]) => `<button data-v="${v}" class="${v === VIEW ? "on" : ""}"><span class="k">${k}</span>${l}</button>`).join("") : "";
   $("#tabs").onclick = (e) => { const b = e.target.closest("button"); if (b) go(b.dataset.v); };
-  const disclaimer = "Independent monitoring platform — not the Electoral Office and not official results. Attendance counts only; no ballot choices are collected.";
+  const disclaimer = "Independent monitoring platform, not the Electoral Office. Counts only: no names and no individual ballots are collected. Results shown are unofficial.";
   if (API.mode === "demo") {
     const d = API.demo;
     $("#banner").innerHTML = `<b>DEMO MODE · SYNTHETIC DATA</b><span>View as:</span><select id="persona">${d.people.map((p) => `<option value="${p.id}" ${p.id === d.persona ? "selected" : ""}>${esc(p.full_name)}</option>`).join("")}</select>
       <button id="play">${d.playing ? "❚❚ Pause" : "▶ Play"}</button><select id="speed">${[2, 5, 15].map((s) => `<option value="${s}" ${s === d.speed ? "selected" : ""}>${s} min/sec</option>`).join("")}</select>
-      <button id="jump">Jump to 12:00</button><label class="row" style="gap:4px"><input type="checkbox" id="noSignal" ${window.VW_FORCE_OFFLINE ? "checked" : ""}> Simulate no signal</label><span class="small">${disclaimer}</span>`;
+      <button id="jump">Jump to 12:00</button><button id="jump2">Jump to 17:00 close</button><button id="jump3">Jump to 19:30 count</button><label class="row" style="gap:4px"><input type="checkbox" id="noSignal" ${window.VW_FORCE_OFFLINE ? "checked" : ""}> Simulate no signal</label><span class="small">${disclaimer}</span>`;
     $("#persona").onchange = (e) => d.setPersona(e.target.value);
     $("#play").onclick = (e) => (e.target.textContent = d.toggle() ? "❚❚ Pause" : "▶ Play");
     $("#speed").onchange = (e) => d.setSpeed(+e.target.value);
-    $("#jump").onclick = () => d.jump(12 * 60);
+    $("#jump").onclick = () => d.jump(12 * 60); $("#jump2").onclick = () => d.jump(17 * 60); $("#jump3").onclick = () => { d.jump(19.5 * 60); SEL.natView = "results"; if (VIEW === "national") viewNational(); };
     $("#noSignal").onchange = (e) => { window.VW_FORCE_OFFLINE = e.target.checked; paintNet(); if (!e.target.checked) flushOutbox(); };
   } else $("#banner").innerHTML = `<span class="small">${disclaimer}</span>`;
   paintNet(); tickClock();
@@ -248,62 +261,147 @@ function redeemScreen() {
   $("#go").onclick = () => guard(async () => { await API.redeem($("#code").value.trim(), $("#name").value.trim()); localStorage.removeItem("vw_invite"); boot(); }, "Account linked.");
 }
 
-// ------------------------------------------------------------------ NATIONAL WATCH (shared)
+// ------------------------------------------------------------------ NATIONAL WATCH (shared — the same for everyone)
+const SRC = { counter: "Neutral counter", official: "Official poll book", party: "Party agents only" };
+const srcPill = (s) => (s === "official" ? '<span class="pill p-rec">OFFICIAL</span>' : s === "counter" ? '<span class="pill p-ok">COUNTER</span>' : s === "party" ? '<span class="pill p-stale">PARTY AGENTS</span>' : "");
+// results helpers
+const leaderOf = (r) => { const cs = r.candidates || []; const tot = cs.reduce((a, c) => a + +c.votes, 0); if (!tot) return null;
+  return { c: cs[0], second: cs[1], tot, margin: (cs[0].votes - (cs[1]?.votes || 0)) / tot }; };
+const resultFill = (r) => { const L = leaderOf(r); if (!L) return "#E5E7E4"; if (L.second && L.c.votes === L.second.votes) return "#C9C9C9"; return hexMix(L.c.color, 0.35 + 0.65 * Math.min(1, L.margin / 0.3)); };
 async function viewNational() {
+  if (!SEL.natView) SEL.natView = "turnout";
   $("#main").innerHTML = `
-  <div class="row" style="margin-bottom:12px"><b style="font-size:16px">National Watch</b><span class="muted small">Shared picture for all parties. Built only from attendance totals that parties chose to share, each with its source shown. Never includes any party's supporter estimates.</span></div>
+  <div class="row" style="margin-bottom:10px"><b style="font-size:16px">National Watch</b><span class="muted small">One shared picture, identical for every party. Turnout comes from the official poll book or a neutral counter where there is one, otherwise from the party agents inside the station. Party supporter numbers are never shown here.</span></div>
+  <div class="seg noprint" id="natView" style="margin-bottom:12px"><button data-v="turnout">🗳 Turnout · who is going</button><button data-v="results">📊 Results · the count after close</button></div>
+  <div id="natBody"></div>`;
+  $$("#natView button").forEach((b) => { b.classList.toggle("on", b.dataset.v === SEL.natView); b.onclick = () => { SEL.natView = b.dataset.v; SEL.natC = null; viewNational(); }; });
+  return SEL.natView === "results" ? natResults() : natTurnout();
+}
+
+async function natTurnout() {
+  $("#natBody").innerHTML = `
   <div class="grid kpis" style="margin-bottom:14px">
-    <div class="card kpi pu"><div class="l">Observed attendance · unverified</div><div class="v num" id="kObs">—</div><div class="s" id="kObsS"></div></div>
-    <div class="card kpi g"><div class="l">Reconciled attendance</div><div class="v num" id="kRec">—</div><div class="s" id="kRecS"></div></div>
+    <div class="card kpi pu"><div class="l">People who have voted</div><div class="v num" id="kObs">—</div><div class="s" id="kObsS"></div></div>
+    <div class="card kpi g"><div class="l">Still to vote</div><div class="v num" id="kRem">—</div><div class="s" id="kRemS"></div></div>
     <div class="card kpi k"><div class="l">Stations reporting</div><div class="v num" id="kSt">—</div><div class="s" id="kStS"></div></div>
-    <div class="card kpi r"><div class="l">Needs attention</div><div class="v num" id="kAl">—</div><div class="s">sources disagree · shared incidents</div></div>
+    <div class="card kpi r"><div class="l">Needs attention</div><div class="v num" id="kAl">—</div><div class="s">over the register · figures disagree · incidents</div></div>
   </div>
   <div class="grid split">
     <div class="card"><h3>Live map · 21 constituencies</h3>
-      <div class="seg noprint" id="natMode" style="margin-bottom:10px"><button data-m="obs">Observed</button><button data-m="rec">Reconciled</button><button data-m="pct">% of electors listed</button></div>
+      <div class="seg noprint" id="natMode" style="margin-bottom:10px"><button data-m="obs">People voted</button><button data-m="pct">% of registered</button></div>
       <div class="map" id="natMap">${mapSVG("natMap")}</div>
       <div class="legend"><span id="lLo">0</span><span class="ramp"></span><span id="lHi"></span></div>
-      <p class="small muted" style="margin-bottom:0">Schematic map: shapes show roughly where each constituency is, not legal boundaries. Tap a constituency for its stations.</p></div>
+      <p class="small muted" style="margin-bottom:0">Boundaries traced from the Electoral Office's constituency map; for display, not a legal boundary map. Tap a constituency for its stations.</p></div>
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Constituencies <span class="sp noprint row"><button class="btn sm ghost" id="natCsv">⬇ CSV</button><button class="btn sm ghost" onclick="print()">⬇ PDF</button></span></h3>
-        <div class="tw" style="max-height:430px"><table><thead><tr><th>Constituency</th><th class="r">Observed</th><th class="r">Reconciled</th><th>% of list</th><th class="r">Stations</th><th class="r">Alerts</th><th class="r">Updated</th></tr></thead><tbody id="natRows"></tbody></table></div></div>
+        <div class="tw" style="max-height:430px"><table><thead><tr><th>Constituency</th><th class="r">Voted</th><th class="r">Registered</th><th>Turnout</th><th class="r">Stations</th><th class="r">Alerts</th><th class="r">Updated</th></tr></thead><tbody id="natRows"></tbody></table></div></div>
       <div class="card hide" id="natDrill"></div>
-      <div class="card"><h3>Attendance through the day</h3><div id="natChart"></div></div>
+      <div class="card"><h3>Turnout through the day</h3><div id="natChart"></div></div>
     </div>
   </div>`;
-  $$("#natMode button").forEach((b) => { b.classList.toggle("on", b.dataset.m === SEL.natMode); b.onclick = () => { SEL.natMode = b.dataset.m; $$("#natMode button").forEach((x) => x.classList.toggle("on", x === b)); load(); }; });
+  if (SEL.natMode !== "pct") SEL.natMode = "obs";
+  $$("#natMode button").forEach((b) => { b.classList.toggle("on", b.dataset.m === SEL.natMode); b.onclick = () => { SEL.natMode = b.dataset.m; $$("#natMode button").forEach((x) => x.classList.toggle("on", x === b)); paint(); }; });
   let rows = [];
-  bindMap("natMap", (code) => { const r = rows.find((x) => x.code === code) || {}; return `<b>${esc(r.name)}</b>Observed ${fmt(r.observed)} · Reconciled ${fmt(r.reconciled)}<br>${r.stations_reporting ?? 0}/${r.stations_total ?? 0} stations · ${pct(r.observed, r.electors_listed)} of list${r.disagreements ? `<br>⚠ ${r.disagreements} station(s): sources disagree` : ""}`; },
-    (code) => { SEL.natC = cByCode(code)?.id; drill(); });
-  $("#natCsv").onclick = () => csv("national-watch.csv", [["constituency", "observed_unverified", "reconciled", "electors_listed", "stations_reporting", "stations_total", "disagreements", "shared_incidents", "last_update", "generated"],
-    ...rows.map((r) => [r.name, r.observed, r.reconciled, r.electors_listed, r.stations_reporting, r.stations_total, r.disagreements, r.shared_incidents, r.last_at, API.now().toISOString()])]);
+  const alerts = (r) => r.over_list + r.disagreements + r.shared_incidents;
+  bindMap("natMap", (code) => { const r = rows.find((x) => x.code === code) || {}; return `<b>${esc(r.name)}</b>Voted ${fmt(r.voted)} of ${fmt(r.electors_listed)} registered (${pct(r.voted, r.electors_listed)})<br>${r.stations_reporting ?? 0}/${r.stations_total ?? 0} stations reporting${r.over_list ? `<br>⚠ ${r.over_list} station(s) above the register` : ""}${r.disagreements ? `<br>⚠ ${r.disagreements} station(s): figures disagree` : ""}`; },
+    (code) => { SEL.natC = cByCode(code)?.id; drill(); paint(); });
+  $("#natCsv").onclick = () => csv("national-watch-turnout.csv", [["constituency", "voted", "registered", "turnout_pct", "stations_reporting", "stations_total", "stations_neutral_counter", "stations_party_agents_only", "over_register", "figures_disagree", "shared_incidents", "last_update", "generated"],
+    ...rows.map((r) => [r.name, r.voted, r.electors_listed, r.electors_listed ? ((r.voted / r.electors_listed) * 100).toFixed(1) : "", r.stations_reporting, r.stations_total, r.from_counter, r.from_party, r.over_list, r.disagreements, r.shared_incidents, r.last_at, API.now().toISOString()])]);
   async function drill() {
     const el = $("#natDrill"); if (!SEL.natC) return el.classList.add("hide");
     const st = await API.nationalStations(SEL.natC); el.classList.remove("hide");
-    el.innerHTML = `<h3>${esc(cName(SEL.natC))} · stations (shared) <span class="sp"><button class="btn sm ghost" id="dClose">Close</button></span></h3><div class="tw" style="max-height:300px"><table><thead><tr><th>Station</th><th>Status</th><th class="r">Observed</th><th class="r">Reconciled</th><th class="r">Updated</th><th>Sources</th></tr></thead><tbody>${
-      st.map((s) => `<tr><td><b>${esc(s.official_code)}</b> <span class="muted small">${esc(s.station_name)}</span></td><td>${stationPill(s.last_at)}</td><td class="r num">${fmt(s.observed)}</td><td class="r num">${fmt(s.reconciled)}</td><td class="r num">${hhmm(s.last_at)}</td><td class="small">${(s.sources || []).map(esc).join(", ") || "—"}${s.disagreement ? ' <span class="pill p-flag">DISAGREE</span>' : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="muted">No stations loaded for this constituency yet.</td></tr>'}</tbody></table></div>`;
+    el.innerHTML = `<h3>${esc(cName(SEL.natC))} · stations <span class="sp"><button class="btn sm ghost" id="dClose">Close</button></span></h3><div class="tw" style="max-height:320px"><table><thead><tr><th>Station</th><th class="r">Voted</th><th class="r">Registered</th><th class="r">%</th><th>Figure from</th><th>Party agents' own counts</th><th class="r">Updated</th></tr></thead><tbody>${
+      st.map((s) => `<tr><td><b>${esc(s.official_code)}</b> <span class="muted small">${esc(s.station_name)}</span>${s.over_list ? ' <span class="pill p-flag">ABOVE REGISTER</span>' : ""}${s.disagreement ? ' <span class="pill p-flag">FIGURES DISAGREE</span>' : ""}</td>
+        <td class="r num"><b>${fmt(s.voted)}</b></td><td class="r num">${fmt(s.electors_listed)}</td><td class="r num">${pct(s.voted, s.electors_listed)}</td><td>${s.voted === null ? stationPill(null) : srcPill(s.source)}</td>
+        <td class="small">${(s.party_figures || []).map((f) => `<span class="lg"><i style="background:${esc(f.color)}"></i>${esc(f.party)} ${fmt(f.attendance)}</span>`).join(" ") || '<span class="muted">—</span>'}</td><td class="r num">${hhmm(s.last_at)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No stations loaded for this constituency yet.</td></tr>'}</tbody></table></div>
+      <p class="small muted" style="margin-bottom:0">"Voted" is one figure per station: the official poll book if entered, otherwise the neutral counter, otherwise (backup) the highest count from party agents who share. Each party's own count is listed beside it so any difference is visible.</p>`;
     $("#dClose").onclick = () => { SEL.natC = null; el.classList.add("hide"); paint(); };
   }
   function paint() {
-    const val = (r) => (SEL.natMode === "rec" ? +r.reconciled : SEL.natMode === "pct" ? (r.electors_listed ? r.observed / r.electors_listed : 0) : +r.observed);
+    const val = (r) => (SEL.natMode === "pct" ? (r.electors_listed ? r.voted / r.electors_listed : 0) : +r.voted);
     const max = SEL.natMode === "pct" ? 0.8 : Math.max(100, ...rows.map(val));
-    const data = {}; rows.forEach((r) => { const f = val(r) / max; data[r.code] = { fill: ramp(f), dark: f < 0.45, value: +r.observed, label: SEL.natMode === "pct" ? (r.electors_listed ? Math.round(val(r) * 100) + "%" : "—") : fmt(val(r)) }; });
+    const data = {}; rows.forEach((r) => { const f = val(r) / max; data[r.code] = { fill: ramp(f), dark: f < 0.45, value: +r.voted, label: SEL.natMode === "pct" ? (r.electors_listed ? Math.round(val(r) * 100) + "%" : "—") : fmt(val(r)) }; });
     paintMap("natMap", data, SEL.natC ? CONSTS.find((c) => c.id === SEL.natC)?.code : null);
     $("#lHi").textContent = SEL.natMode === "pct" ? "80%+" : fmt(max); $("#lLo").textContent = SEL.natMode === "pct" ? "0%" : "0";
   }
   async function load() {
     const [sum, tl] = await Promise.all([API.nationalSummary(), API.nationalTimeline()]); rows = sum;
     const T = (k) => rows.reduce((a, r) => a + +r[k], 0);
-    const obs = T("observed"), rec = T("reconciled"), el = T("electors_listed"), rep = T("stations_reporting"), tot = T("stations_total");
-    $("#kObs").textContent = fmt(obs); $("#kObsS").textContent = el ? pct(obs, el) + " of electors listed" : "electors list not loaded yet";
-    $("#kRec").textContent = fmt(rec); $("#kRecS").textContent = pct(rec, obs) + " of observed figures reconciled";
-    $("#kSt").textContent = `${rep} / ${tot}`; $("#kStS").textContent = `${tot - rep} not yet reported`;
-    $("#kAl").textContent = fmt(T("disagreements") + T("shared_incidents"));
-    $("#natRows").innerHTML = rows.map((r) => `<tr class="click" data-id="${r.constituency_id}"><td><b>${esc(r.name)}</b></td><td class="r num">${fmt(r.observed)}</td><td class="r num">${fmt(r.reconciled)}</td>
-      <td><div class="row" style="gap:6px;flex-wrap:nowrap"><div class="bar"><i style="width:${r.electors_listed ? Math.min(100, (r.observed / r.electors_listed) * 125) : 0}%"></i></div><span class="small num">${pct(r.observed, r.electors_listed)}</span></div></td>
-      <td class="r num">${r.stations_reporting}/${r.stations_total}</td><td class="r">${r.disagreements + r.shared_incidents ? `<span class="pill p-flag">${r.disagreements + r.shared_incidents}</span>` : '<span class="muted">—</span>'}</td><td class="r num">${hhmm(r.last_at)}</td></tr>`).join("");
+    const v = T("voted"), el = T("electors_listed"), rep = T("stations_reporting"), tot = T("stations_total");
+    $("#kObs").textContent = fmt(v); $("#kObsS").textContent = el ? `${pct(v, el)} of ${fmt(el)} registered` : "register not loaded yet";
+    $("#kRem").textContent = el ? fmt(Math.max(0, el - v)) : "—"; $("#kRemS").textContent = el ? "registered voters not yet recorded" : "";
+    $("#kSt").textContent = `${rep} / ${tot}`; $("#kStS").textContent = `${T("from_counter")} by neutral counter · ${T("from_party")} by party agents only`;
+    $("#kAl").textContent = fmt(rows.reduce((a, r) => a + alerts(r), 0));
+    $("#natRows").innerHTML = rows.map((r) => `<tr class="click" data-id="${r.constituency_id}"><td><b>${esc(r.name)}</b></td><td class="r num"><b>${fmt(r.voted)}</b></td><td class="r num">${fmt(r.electors_listed)}</td>
+      <td><div class="row" style="gap:6px;flex-wrap:nowrap"><div class="bar"><i style="width:${r.electors_listed ? Math.min(100, (r.voted / r.electors_listed) * 100) : 0}%"></i></div><span class="small num">${pct(r.voted, r.electors_listed)}</span></div></td>
+      <td class="r num">${r.stations_reporting}/${r.stations_total}</td><td class="r">${alerts(r) ? `<span class="pill p-flag">${alerts(r)}</span>` : '<span class="muted">—</span>'}</td><td class="r num">${hhmm(r.last_at)}</td></tr>`).join("");
     $$("#natRows tr").forEach((tr) => (tr.onclick = () => { SEL.natC = +tr.dataset.id; drill(); paint(); }));
     paint(); timeline($("#natChart"), tl); if (SEL.natC) drill();
+  }
+  REFRESH = load; await guard(load);
+}
+
+async function natResults() {
+  $("#natBody").innerHTML = `
+  <div class="receipt" style="margin-bottom:12px;border-color:#EFD978;background:#FFFBE6"><b>UNOFFICIAL.</b> Station-by-station count totals: the official sheet where entered, otherwise the neutral counter, otherwise the party agents who witnessed the count. Only the Electoral Office declares the result. No individual ballots are recorded, only each station's totals.</div>
+  <div class="grid kpis" style="margin-bottom:14px">
+    <div class="card kpi k"><div class="l">Stations counted</div><div class="v num" id="rSt">—</div><div class="s" id="rStS"></div></div>
+    <div class="card kpi pu"><div class="l">Ballots counted</div><div class="v num" id="rBal">—</div><div class="s" id="rBalS"></div></div>
+    <div class="card kpi r"><div class="l">Rejected / spoilt</div><div class="v num" id="rRej">—</div><div class="s" id="rRejS"></div></div>
+    <div class="card kpi g" style="grid-column:span 2"><div class="l">Constituencies · who is ahead</div><div id="rTally" class="row" style="gap:6px;margin-top:6px"></div><div class="s">"Fully counted" = every station in the constituency has reported</div></div>
+  </div>
+  <div class="grid split">
+    <div class="card"><h3>Results map · leading candidate</h3>
+      <div class="map" id="resMap">${mapSVG("resMap")}</div>
+      <div class="legend" id="resLeg"></div>
+      <p class="small muted" style="margin-bottom:0">Each constituency takes the colour of the candidate ahead: darker = bigger lead, lighter = close. Grey = not counted yet.</p></div>
+    <div class="grid" style="align-content:start">
+      <div class="card"><h3>Constituencies <span class="sp noprint row"><button class="btn sm ghost" id="resCsv">⬇ CSV</button><button class="btn sm ghost" onclick="print()">⬇ PDF</button></span></h3>
+        <div class="tw" style="max-height:430px"><table><thead><tr><th>Constituency</th><th>Ahead</th><th class="r">Votes</th><th class="r">Lead</th><th class="r">Counted</th><th class="r">Rejected</th><th class="r">Updated</th></tr></thead><tbody id="resRows"></tbody></table></div></div>
+      <div class="card hide" id="resDrill"></div>
+    </div>
+  </div>`;
+  let rows = [];
+  bindMap("resMap", (code) => { const r = rows.find((x) => x.code === code) || {}; const tot = (r.candidates || []).reduce((a, c) => a + +c.votes, 0);
+    return `<b>${esc(r.name)}</b>${r.stations_counted || 0}/${r.stations_total || 0} stations counted<br>` + ((r.candidates || []).map((c) => `<span class="lg"><i style="background:${esc(c.color)}"></i>${esc(c.name)} (${esc(c.party)}) ${fmt(c.votes)} · ${pct(c.votes, tot)}</span>`).join("<br>") || "No candidates entered yet"); },
+    (code) => { SEL.natC = cByCode(code)?.id; drill(); paint(); });
+  $("#resCsv").onclick = () => { const out = [["UNOFFICIAL station count totals — not the declared result"], ["constituency", "stations_counted", "stations_total", "candidate", "affiliation", "votes", "ballots_counted", "rejected", "generated"]];
+    rows.forEach((r) => (r.candidates || []).forEach((c) => out.push([r.name, r.stations_counted, r.stations_total, c.name, c.party, c.votes, r.ballots, r.rejected, API.now().toISOString()]))); csv("national-watch-results-UNOFFICIAL.csv", out); };
+  async function drill() {
+    const el = $("#resDrill"); if (!SEL.natC) return el.classList.add("hide");
+    const r = rows.find((x) => x.constituency_id === SEL.natC) || {}, st = await API.nationalStationResults(SEL.natC), cs = r.candidates || [];
+    const tot = cs.reduce((a, c) => a + +c.votes, 0); el.classList.remove("hide");
+    el.innerHTML = `<h3>${esc(r.name)} · ${r.stations_counted}/${r.stations_total} stations counted <span class="sp"><button class="btn sm ghost" id="dClose">Close</button></span></h3>
+      ${cs.map((c) => `<div style="margin:6px 0"><div class="row" style="justify-content:space-between"><span><span class="lg"><i style="background:${esc(c.color)}"></i><b>${esc(c.name)}</b></span> <span class="muted small">${esc(c.party)}</span></span><span class="num"><b>${fmt(c.votes)}</b> · ${pct(c.votes, tot)}</span></div>
+        <div class="bar" style="width:100%"><i style="width:${tot ? (c.votes / tot) * 100 : 0}%;background:${esc(c.color)}"></i></div></div>`).join("") || '<p class="muted small">No candidates entered for this constituency yet.</p>'}
+      <div class="tw" style="max-height:300px;margin-top:10px"><table><thead><tr><th>Station</th><th class="r">Voted today</th>${cs.map((c) => `<th class="r">${esc(c.party)}</th>`).join("")}<th class="r">Rejected</th><th class="r">Ballots</th><th>From</th></tr></thead><tbody>${
+        st.map((s) => `<tr><td><b>${esc(s.official_code)}</b> <span class="muted small">${esc(s.station_name)}</span>${(s.flags || []).length ? `<div class="small" style="color:var(--red)">⚠ ${esc(s.flags.join("; "))}</div>` : ""}</td><td class="r num">${fmt(s.voted)}</td>
+          ${cs.map((c) => `<td class="r num">${s.votes ? fmt(s.votes[c.id]) : "—"}</td>`).join("")}<td class="r num">${s.votes ? fmt(s.rejected) : "—"}</td><td class="r num">${s.votes ? fmt(s.total_ballots) : '<span class="pill p-none">NOT COUNTED</span>'}</td><td>${s.votes ? srcPill(s.source) : ""}</td></tr>`).join("")}</tbody></table></div>
+      <p class="small muted" style="margin-bottom:0">A warning appears if a station's ballots are more than the people recorded voting there, or more than its register.</p>`;
+    $("#dClose").onclick = () => { SEL.natC = null; el.classList.add("hide"); paint(); };
+  }
+  function paint() {
+    const data = {}; rows.forEach((r) => { const L = leaderOf(r), f = resultFill(r);
+      data[r.code] = { fill: f, dark: !L || Math.min(1, L.margin / 0.3) < 0.35, value: +r.ballots, label: L ? (L.second && L.c.votes === L.second.votes ? "TIE" : L.c.party) : "" }; });
+    paintMap("resMap", data, SEL.natC ? CONSTS.find((c) => c.id === SEL.natC)?.code : null);
+    const seen = new Map(); rows.forEach((r) => (r.candidates || []).forEach((c) => seen.set(c.party, c.color)));
+    $("#resLeg").innerHTML = [...seen].map(([p, c]) => `<span class="lg"><i style="background:${esc(c)}"></i>${esc(p)}</span>`).join("") + '<span class="lg"><i style="background:#E5E7E4"></i>Not counted</span>';
+  }
+  async function load() {
+    rows = await API.nationalResults();
+    const T = (k) => rows.reduce((a, r) => a + +r[k], 0), cnt = T("stations_counted"), tot = T("stations_total"), bal = T("ballots"), rej = T("rejected");
+    $("#rSt").textContent = `${cnt} / ${tot}`; $("#rStS").textContent = tot ? pct(cnt, tot) + " of stations" : "";
+    $("#rBal").textContent = fmt(bal); $("#rBalS").textContent = "including rejected"; $("#rRej").textContent = fmt(rej); $("#rRejS").textContent = bal ? pct(rej, bal) + " of ballots" : "";
+    const tally = new Map(); rows.forEach((r) => { const L = leaderOf(r); if (!L || (L.second && L.c.votes === L.second.votes)) return; const k = L.c.party, t = tally.get(k) || { color: L.c.color, ahead: 0, full: 0 };
+      t.ahead++; if (r.stations_counted === r.stations_total && r.stations_total) t.full++; tally.set(k, t); });
+    $("#rTally").innerHTML = [...tally].sort((a, b) => b[1].ahead - a[1].ahead).map(([p, t]) => `<span class="chip" style="background:${esc(t.color)};color:#fff;padding:6px 10px"><b>${esc(p)}</b>&nbsp;ahead in ${t.ahead} · fully counted ${t.full}</span>`).join("") || '<span class="muted small">No station has reported a count yet.</span>';
+    $("#resRows").innerHTML = rows.map((r) => { const L = leaderOf(r);
+      return `<tr class="click" data-id="${r.constituency_id}"><td><b>${esc(r.name)}</b>${r.flagged ? ` <span class="pill p-flag">⚠ ${r.flagged}</span>` : ""}</td>
+      <td>${L ? `<span class="lg"><i style="background:${esc(L.c.color)}"></i>${esc(L.c.name)} <span class="muted small">${esc(L.c.party)}</span></span>` : '<span class="muted">—</span>'}</td>
+      <td class="r num">${L ? fmt(L.c.votes) : "—"}</td><td class="r num">${L && L.second ? "+" + fmt(L.c.votes - L.second.votes) : "—"}</td>
+      <td class="r num">${r.stations_counted}/${r.stations_total}</td><td class="r num">${fmt(r.rejected)}</td><td class="r num">${hhmm(r.last_at)}</td></tr>`; }).join("");
+    $$("#resRows tr").forEach((tr) => (tr.onclick = () => { SEL.natC = +tr.dataset.id; drill(); paint(); }));
+    paint(); if (SEL.natC) drill();
   }
   REFRESH = load; await guard(load);
 }
@@ -312,12 +410,13 @@ async function viewNational() {
 async function viewStation() {
   const sts = ME.stations; if (!sts.length) { $("#main").innerHTML = '<div class="card">You are not assigned to a polling station yet. Ask your party administrator.</div>'; return; }
   if (!sts.find((s) => s.id === SEL.repStation)) SEL.repStation = sts[0].id;
-  const st = sts.find((s) => s.id === SEL.repStation), P = ME.party;
+  const st = sts.find((s) => s.id === SEL.repStation), P = ME.party, job = localStorage.getItem("vw_job") || "both";
+  if (!SEL.repTabSet) { SEL.repTab = job === "outside" ? "support" : "turnout"; SEL.repTabSet = true; }
   $("#main").innerHTML = `<div class="rep">
     ${sts.length > 1 ? `<select class="inp" id="stSel" style="margin-bottom:10px">${sts.map((s) => `<option value="${s.id}" ${s.id === st.id ? "selected" : ""}>${esc(s.official_code)} — ${esc(s.name)}</option>`).join("")}</select>` : ""}
     <div class="receipt"><div class="h"><span>${esc(st.official_code)}</span><span class="pill p-ok">ASSIGNED</span></div><div>${esc(st.name)}</div><div class="muted small">${esc(st.district || "")} · ${esc(cName(st.constituency_id))}${st.electors_listed ? ` · ${fmt(st.electors_listed)} electors on list` : ""}</div></div>
     <div id="outbox"></div>
-    <div class="rtabs"><button data-t="turnout">Turnout</button><button data-t="support" class="priv">🔒 Supporters</button><button data-t="incident">Incident</button><button data-t="history">My reports</button></div>
+    <div class="rtabs">${job === "outside" ? "" : '<button data-t="turnout">Live count</button>'}<button data-t="support" class="priv">🔒 Our supporters</button>${job === "outside" ? '<button data-t="turnout">Live count</button>' : ""}${job === "outside" ? "" : '<button data-t="results">Count after close</button>'}<button data-t="incident">Incident</button><button data-t="history">My reports</button></div>
     <div id="repBody"></div></div>`;
   $("#stSel") && ($("#stSel").onchange = (e) => { SEL.repStation = e.target.value; viewStation(); });
   $$(".rtabs button").forEach((b) => (b.onclick = () => { SEL.repTab = b.dataset.t; tab(); }));
@@ -337,37 +436,67 @@ async function viewStation() {
     $$(".rtabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === SEL.repTab));
     const B = $("#repBody");
     if (SEL.repTab === "turnout") {
-      const key = newKey();
-      B.innerHTML = `<div class="card"><div class="small muted">Your last accepted total</div><div style="font-size:22px;font-weight:800" class="num" id="lastTot">${lastTotHtml()}</div>
-        <label class="f">Total people seen voting so far (running total)</label><input class="inp bigin num" id="cnt" type="number" inputmode="numeric" min="0" placeholder="0">
-        <label class="f">Note (optional — no names)</label><input class="inp" id="note" maxlength="500" placeholder="e.g. queue of about 30 people">
-        <button class="btn big y" style="margin-top:14px" id="send">Send turnout report</button><div id="sendMsg" style="margin-top:10px"></div>
-        <p class="small muted" style="margin-bottom:0">The server records the official time. If you tap twice, it is only counted once.</p></div>`;
-      $("#send").onclick = () => guard(async () => {
-        const v = parseInt($("#cnt").value, 10); if (!(v >= 0)) throw new Error("Enter the running total as a whole number.");
-        const l = lastGood(); if (l && v < l.attendance && !confirm(`This is lower than your last total (${l.attendance}). Send anyway? Use "My reports → Correct" to fix a mistake instead.`)) return;
-        const r = await send("attendance", { station: st.id, key, attendance: v, note: $("#note").value.trim() });
-        confirmBox(r, () => tab()); if (!r.queued) loadMine();
-      });
+      const T = tallyGet("att", st.id), l0 = lastGood();
+      if (l0 && l0.attendance > T.n && !T.touched) { T.n = l0.attendance; tallySet("att", st.id, T); }
+      B.innerHTML = `<div class="card"><div class="tally"><div class="small muted">Everyone who has voted at this station (our agent's count)</div><div class="tn num" id="aN">${fmt(T.n)}</div><div class="small muted" id="aPct"></div>
+          <button class="btn big y" id="plus">+1 voter</button><button class="btn sm ghost" style="margin-top:8px" id="minus">−1 undo last tap</button></div>
+        <div class="small" style="text-align:center;margin-top:8px">Last accepted: <span class="num" id="lastTot">${lastTotHtml()}</span></div>
+        <button class="btn" style="margin-top:12px;width:100%" id="send">Send now</button><div id="sendMsg" style="margin-top:10px"></div>
+        <details style="margin-top:10px"><summary class="small">Type the total instead</summary><div class="row" style="margin-top:6px"><input class="inp num" id="cnt" type="number" inputmode="numeric" min="0" style="flex:1"><button class="btn sm ghost" id="setN">Use this total</button></div>
+          <label class="f">Note (optional — no names)</label><input class="inp" id="note" maxlength="500" placeholder="e.g. queue of about 30 people"></details>
+        <p class="small muted" style="margin-bottom:0">Tap <b>+1</b> for every person who votes. The total sends by itself 20 seconds after your last tap, and taps are saved on this phone if there is no signal. It goes to your watch room${P.share_counts ? ", and to the National Watch (where there is no neutral counter, the highest party count is used)" : ""}. Not counted twice if sent twice.</p></div>`;
+      let autoT = null;
+      const show = () => { $("#aN").textContent = fmt(T.n); $("#aPct").textContent = st.electors_listed ? `${pct(T.n, st.electors_listed)} of the ${fmt(st.electors_listed)} registered` : ""; };
+      const sendNow = async (manual) => {
+        clearTimeout(autoT); const l = lastGood(); if (!manual && l && l.attendance === T.n) return;
+        if (l && T.n < l.attendance && !confirm(`This is lower than your last total (${l.attendance}). Send anyway? Use "My reports → Correct" to fix a mistake instead.`)) return;
+        const r = await send("attendance", { station: st.id, key: tallySendKey("att", st.id, T), attendance: T.n, note: ($("#note")?.value || "").trim() });
+        if (manual || r.flags?.length || r.queued) confirmBox(r, () => tab()); if (!r.queued) loadMine();
+      };
+      const bump = (d) => { T.n = Math.max(0, T.n + d); T.touched = true; tallySet("att", st.id, T); show(); clearTimeout(autoT); autoT = setTimeout(() => guard(() => sendNow(false)), 20000); };
+      $("#plus").onclick = () => bump(1); $("#minus").onclick = () => bump(-1);
+      $("#setN").onclick = () => { const v = parseInt($("#cnt").value, 10); if (!(v >= 0)) return toast("Enter the running total as a whole number.", true); T.n = v; T.touched = true; tallySet("att", st.id, T); show(); };
+      $("#send").onclick = () => guard(() => sendNow(true));
+      show();
     } else if (SEL.repTab === "support") {
-      const key = newKey(), l = lastGood(), e = lastEst();
+      const e = lastEst(), T = tallyGet("sup", st.id);
+      if (e && e.estimated_supporters > T.n) { T.n = e.estimated_supporters; tallySet("sup", st.id, T); }
+      let voted = null;
       B.innerHTML = `<div class="card" style="border-top:4px solid var(--party)"><div class="row"><span class="private">🔒 Private to ${esc(P.short_name)}</span></div>
-        <p class="small" style="margin:8px 0 0">Goes only to <b>${esc(P.name)}</b>'s head office and your watch room. Never shared with other parties, never in the National Watch. It is <b>your estimate</b>, not a vote count. Numbers only — never write voters' names.</p>
-        <div class="grid two" style="margin-top:10px;gap:8px"><div class="receipt"><div class="small muted">Turnout so far</div><b class="num">${l ? fmt(l.attendance) : "—"}</b></div><div class="receipt"><div class="small muted">Your last estimate</div><b class="num">${e ? fmt(e.estimated_supporters) + " · " + hhmm(e.received_at) : "—"}</b></div></div>
-        <label class="f">Of the people who have voted so far, how many do you believe support ${esc(P.short_name)}?</label><input class="inp bigin num" id="est" type="number" inputmode="numeric" min="0" placeholder="0">
-        <div id="estPct" class="small muted" style="text-align:center"></div>
+        <p class="small" style="margin:8px 0 0">Goes only to <b>${esc(P.name)}</b>'s head office and your watch room. Never shared with other parties and never on the National Watch. It is <b>your count of supporters you recognise coming in</b>, not a vote count: people can change their mind in the booth. Numbers only, never names.</p>
+        <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:10px;gap:8px">
+          <div class="receipt"><div class="small muted">Voted here so far</div><b class="num" id="sVoted">…</b></div>
+          <div class="receipt"><div class="small muted">Our expected here</div><b class="num" id="sExp">…</b></div>
+          <div class="receipt"><div class="small muted">Last sent</div><b class="num">${e ? fmt(e.estimated_supporters) + " · " + hhmm(e.received_at) : "—"}</b></div></div>
+        <div class="tally"><div class="small muted">Our supporters present so far</div><div class="tn num" id="supN">${fmt(T.n)}</div>
+          <button class="btn big" style="background:var(--party)" id="plus">+1 supporter came in</button>
+          <button class="btn sm ghost" style="margin-top:8px" id="minus">−1 undo last tap</button><div id="estPct" class="small muted" style="margin-top:6px"></div></div>
+        <details style="margin-top:6px"><summary class="small">Type the number instead</summary><div class="row" style="margin-top:6px"><input class="inp num" id="est" type="number" inputmode="numeric" min="0" style="flex:1"><button class="btn sm ghost" id="setN">Use this number</button></div></details>
         <label class="f">How sure are you?</label><div class="seg" id="conf"><button data-c="low">Rough guess</button><button data-c="medium" class="on">Fairly sure</button><button data-c="high">Very sure</button></div>
         <label class="f">Note (optional — no names)</label><input class="inp" id="enote" maxlength="500">
-        <button class="btn big" style="margin-top:14px;background:var(--party)" id="send">Send private estimate</button><div id="sendMsg" style="margin-top:10px"></div></div>`;
+        <button class="btn big" style="margin-top:14px;background:var(--party)" id="send">Send to head office</button><div id="sendMsg" style="margin-top:10px"></div>
+        <p class="small muted" style="margin-bottom:0">Your taps are saved on this phone, so nothing is lost if the screen closes. Send every 15–30 minutes, or whenever you can.</p></div>`;
+      const show = () => { $("#supN").textContent = fmt(T.n); $("#estPct").textContent = voted ? `≈ ${pct(T.n, voted)} of the people who have voted here` : ""; };
+      API.nationalStations(st.constituency_id).then((ns) => { const x = ns.find((n) => n.station_id === st.id); voted = x?.voted ?? lastGood()?.attendance ?? null; const el = $("#sVoted"); if (el) el.textContent = fmt(voted); show(); }).catch(() => { const el = $("#sVoted"); if (el) el.textContent = "—"; });
+      API.myTarget(st.id).then((x) => { const el = $("#sExp"); if (el) el.textContent = fmt(x); }).catch(() => { const el = $("#sExp"); if (el) el.textContent = "—"; });
+      $("#plus").onclick = () => { T.n++; tallySet("sup", st.id, T); show(); };
+      $("#minus").onclick = () => { if (T.n > 0) T.n--; tallySet("sup", st.id, T); show(); };
+      $("#setN").onclick = () => { const v = parseInt($("#est").value, 10); if (!(v >= 0)) return toast("Enter a whole number.", true); T.n = v; tallySet("sup", st.id, T); show(); };
       let conf = "medium";
       $$("#conf button").forEach((b) => (b.onclick = () => { conf = b.dataset.c; $$("#conf button").forEach((x) => x.classList.toggle("on", x === b)); }));
-      $("#est").oninput = () => { const v = +$("#est").value; $("#estPct").textContent = l && v ? `≈ ${pct(v, l.attendance)} of turnout so far` : ""; };
       $("#send").onclick = () => guard(async () => {
-        const v = parseInt($("#est").value, 10); if (!(v >= 0)) throw new Error("Enter a whole number.");
-        if (l && v > l.attendance) throw new Error("The estimate cannot be more than the turnout so far (" + l.attendance + ").");
-        const r = await send("estimate", { station: st.id, key, estimate: v, confidence: conf, note: $("#enote").value.trim() });
+        const v = T.n;
+        if (voted !== null && v > voted && !confirm(`${v} is more than the ${voted} people recorded voting here so far. Send anyway?`)) return;
+        const r = await send("estimate", { station: st.id, key: tallySendKey("sup", st.id, T), estimate: v, confidence: conf, note: $("#enote").value.trim() });
         confirmBox(r, () => tab()); if (!r.queued) loadMine();
       });
+    } else if (SEL.repTab === "results") {
+      B.innerHTML = `<div class="card" id="resForm"><p class="muted small">Loading…</p></div>`;
+      API.myCounts(st.id).then(async (m) => { const prev = m.results.find((r) => !r.superseded);
+        const ns = await API.nationalStations(st.constituency_id).catch(() => []), voted = ns.find((n) => n.station_id === st.id)?.voted;
+        await resultsForm($("#resForm"), st, { previous: prev, voted });
+        $("#resForm").insertAdjacentHTML("beforeend", `<p class="small muted" style="margin-bottom:0">Used on the National Watch only where there is no neutral counter or official figure${P.share_counts ? "" : " — and only if your party shares its counts (it does not at the moment)"}. If another party's agent has entered different totals, yours is flagged so the difference is visible.</p>`);
+      }).catch((e) => toast(e.message, true));
     } else if (SEL.repTab === "incident") {
       const key = newKey();
       B.innerHTML = `<div class="card"><label class="f">What happened?</label><select class="inp" id="cat">${INCIDENT_CATS.map((c) => `<option>${c}</option>`).join("")}</select>
@@ -398,13 +527,110 @@ async function viewStation() {
       const v = parseInt($("#cv").value, 10), reason = $("#cr").value.trim(); if (!(v >= 0) || reason.length < 3) throw new Error("Enter the correct total and a reason.");
       const r = await send("correction", { original: s.id, key, attendance: v, reason });
       if (r.queued || r.duplicate) return confirmBox(r, () => { SEL.repTab = "history"; tab(); });
+      const t = tallyGet("att", st.id); t.n = v; tallySet("att", st.id, t);
       toast("✓ Correction received. The original is kept on record."); SEL.repTab = "history"; await loadMine(); tab();
     });
   }
   paintNet(); tab(); REFRESH = loadMine; await guard(loadMine); flushOutbox();
 }
 
+// ------------------------------------------------------------------ NEUTRAL COUNTER (no party): turnout as voters come in, station count after close
+// Shared form for entering one station's count totals (used by the counter and by the system admin for official figures)
+async function resultsForm(el, st, opts = {}) {
+  const cands = await API.candidates(st.constituency_id);
+  if (!cands.length) { el.innerHTML = `<div class="receipt">No candidates have been entered for ${esc(cName(st.constituency_id))} yet. The system administrator adds them after Nomination Day.</div>`; return; }
+  const prev = opts.previous, key = newKey();
+  el.innerHTML = `${prev ? `<div class="receipt" style="border-color:#9CD3B3"><b>Already sent at ${hhmm(prev.received_at)}</b> · ${fmt(prev.total_ballots)} ballots. Sending again will <b>correct</b> it (the first version is kept on record).</div>` : ""}
+    <p class="small muted" style="margin-top:0">Enter the totals announced for this station at the count. One number per candidate (0 if none) and the rejected/spoilt ballots.</p>
+    ${cands.map((c) => `<label class="f"><span class="lg"><i style="background:${esc(c.color)}"></i>${esc(c.name)}</span> <span class="muted small">${esc(c.party)}</span></label><input class="inp num rv" data-c="${c.id}" type="number" inputmode="numeric" min="0" value="${prev ? prev.votes[c.id] ?? "" : ""}">`).join("")}
+    <label class="f">Rejected / spoilt ballots</label><input class="inp num" id="rRejIn" type="number" inputmode="numeric" min="0" value="${prev ? prev.rejected : ""}">
+    <div class="receipt" style="margin-top:10px" id="rTot"></div>
+    ${prev ? '<label class="f">Reason for the correction (required)</label><input class="inp" id="rReason" placeholder="e.g. recount of box 2">' : ""}
+    <button class="btn big ${opts.official ? "dark" : "y"}" style="margin-top:12px" id="rSend">${opts.official ? "Save official station result" : "Send station count"}</button><div id="rMsg" style="margin-top:10px"></div>`;
+  const sum = () => { let t = 0, ok = true; $$(".rv", el).forEach((i) => { const v = parseInt(i.value, 10); if (v >= 0) t += v; else ok = false; }); const rj = parseInt($("#rRejIn", el).value, 10); return { t, rj: rj >= 0 ? rj : null, ok: ok && rj >= 0 }; };
+  const paintTot = () => { const x = sum(); $("#rTot", el).innerHTML = `Total ballots: <b class="num">${fmt(x.t + (x.rj || 0))}</b>${opts.voted ? ` · people recorded voting here: <b class="num">${fmt(opts.voted)}</b>${x.t + (x.rj || 0) > opts.voted ? ' <span class="pill p-flag">MORE BALLOTS THAN VOTERS</span>' : ""}` : ""}`; };
+  el.oninput = paintTot; paintTot();
+  $("#rSend", el).onclick = () => guard(async () => {
+    const x = sum(); if (!x.ok) throw new Error("Enter a whole number for every candidate and for rejected ballots (0 if none).");
+    const votes = {}; $$(".rv", el).forEach((i) => (votes[i.dataset.c] = parseInt(i.value, 10)));
+    const reason = prev ? ($("#rReason", el).value || "").trim() : null; if (prev && reason.length < 3) throw new Error("Give a reason for the correction.");
+    if (!confirm(`Send these totals for ${st.official_code}? ${fmt(x.t + x.rj)} ballots in all.`)) return;
+    const r = await send("results", { station: st.id, key, votes, rejected: x.rj, corrects: prev?.id || null, reason });
+    $("#rMsg", el).innerHTML = r.queued ? '<div class="outbox"><b>⏳ No signal — saved on this phone.</b> It will send automatically.</div>'
+      : `<div class="receipt" style="border-color:#9CD3B3"><b>✓ Received at ${hhmm(r.received_at)}</b> · ref ${esc(r.id)}${r.flags?.length ? `<div class="small" style="color:var(--red)">⚠ Shown as a warning on the National Watch: ${esc(r.flags.join("; "))}</div>` : ""}</div>`;
+    opts.onSent && opts.onSent(r);
+  });
+}
+
+async function viewCounter() {
+  const sts = ME.stations; if (!sts.length) { $("#main").innerHTML = '<div class="card">You are not assigned to a polling station yet. Ask the system administrator.</div>'; return; }
+  if (!sts.find((s) => s.id === SEL.repStation)) SEL.repStation = sts[0].id;
+  const st = sts.find((s) => s.id === SEL.repStation);
+  if (!["count", "results", "history"].includes(SEL.cntTab)) SEL.cntTab = "count";
+  $("#main").innerHTML = `<div class="rep">
+    <div class="receipt"><div class="h"><span>${esc(st.official_code)}</span><span class="pill p-ok">NEUTRAL COUNTER</span></div><div>${esc(st.name)}</div><div class="muted small">${esc(st.district || "")} · ${esc(cName(st.constituency_id))}${st.electors_listed ? ` · ${fmt(st.electors_listed)} registered` : ""}</div>
+      <div class="small" style="margin-top:4px">You belong to no party. Your figure is the one every party sees on the National Watch.</div></div>
+    <div id="outbox"></div>
+    <div class="rtabs"><button data-t="count">Voters in</button><button data-t="results">Count after close</button><button data-t="history">My entries</button></div>
+    <div id="cBody"></div></div>`;
+  $$(".rtabs button").forEach((b) => (b.onclick = () => { SEL.cntTab = b.dataset.t; tab(); }));
+  let mine = { counts: [], results: [] }, autoT = null;
+  const lastCount = () => mine.counts.find((c) => !c.superseded);
+  const lastRes = () => mine.results.find((r) => !r.superseded);
+  async function loadMine() { mine = await API.myCounts(st.id); if (SEL.cntTab === "history") tab(); else paintCount(); }
+  const T = tallyGet("vot", st.id);
+  function paintCount() {
+    const n = $("#vN"); if (!n) return; const l = lastCount();
+    if (l && l.voted > T.n && !T.touched) { T.n = l.voted; tallySet("vot", st.id, T); }
+    n.textContent = fmt(T.n);
+    const unsent = !l || l.voted !== T.n;
+    $("#vSent").innerHTML = l ? `Last sent: <b class="num">${fmt(l.voted)}</b> at ${hhmm(l.received_at)}${unsent ? ` · <span style="color:var(--amber)">${fmt(T.n)} not sent yet</span>` : ' · <span style="color:var(--green)">✓ up to date</span>'}` : `<span style="color:var(--amber)">Nothing sent yet</span>`;
+    $("#vPct").textContent = st.electors_listed ? `${pct(T.n, st.electors_listed)} of the ${fmt(st.electors_listed)} registered` : "";
+  }
+  async function sendCount(manual) {
+    clearTimeout(autoT); autoT = null; const l = lastCount(); if (l && l.voted === T.n && !manual) return;
+    if (l && T.n < l.voted && !confirm(`This is lower than the ${l.voted} you sent before. Send ${T.n}?`)) return;
+    const r = await send("count", { station: st.id, key: tallySendKey("vot", st.id, T), voted: T.n });
+    if (r.queued) toast("No signal: saved on this phone, it will send automatically."); else { if (r.flags?.length) toast("Sent, with a warning: " + r.flags.join("; "), true); else if (manual) toast("✓ Sent: " + fmt(T.n)); await loadMine(); }
+  }
+  const autoSend = () => { clearTimeout(autoT); autoT = setTimeout(() => guard(() => sendCount(false)), 20000); };
+  function tab() {
+    $$(".rtabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === SEL.cntTab));
+    const B = $("#cBody");
+    if (SEL.cntTab === "count") {
+      B.innerHTML = `<div class="card"><div class="tally"><div class="small muted">People who have voted at this station</div><div class="tn num" id="vN">${fmt(T.n)}</div><div class="small muted" id="vPct"></div>
+          <button class="btn big y" id="plus">+1 voter</button><button class="btn sm ghost" style="margin-top:8px" id="minus">−1 undo last tap</button></div>
+        <div class="small" id="vSent" style="text-align:center;margin-top:8px"></div>
+        <button class="btn" style="margin-top:12px;width:100%" id="sendNow">Send now</button>
+        <details style="margin-top:10px"><summary class="small">Type the total instead (e.g. from the poll book)</summary><div class="row" style="margin-top:6px"><input class="inp num" id="vSet" type="number" inputmode="numeric" min="0" style="flex:1"><button class="btn sm ghost" id="vSetGo">Use this total</button></div></details>
+        <p class="small muted" style="margin-bottom:0">Tap <b>+1</b> each time a voter is entered in the poll book. The total sends by itself 20 seconds after your last tap; taps are saved on this phone, so nothing is lost without signal.</p></div>`;
+      $("#plus").onclick = () => { T.n++; T.touched = true; tallySet("vot", st.id, T); paintCount(); autoSend(); };
+      $("#minus").onclick = () => { if (T.n > 0) T.n--; T.touched = true; tallySet("vot", st.id, T); paintCount(); autoSend(); };
+      $("#sendNow").onclick = () => guard(() => sendCount(true));
+      $("#vSetGo").onclick = () => { const v = parseInt($("#vSet").value, 10); if (!(v >= 0)) return toast("Enter a whole number.", true); T.n = v; T.touched = true; tallySet("vot", st.id, T); paintCount(); guard(() => sendCount(true)); };
+      paintCount();
+    } else if (SEL.cntTab === "results") {
+      B.innerHTML = `<div class="card" id="resForm"><p class="muted small">Loading…</p></div>`;
+      resultsForm($("#resForm"), st, { previous: lastRes(), voted: lastCount()?.voted, onSent: () => loadMine().then(() => (SEL.cntTab === "results" ? null : null)) });
+    } else {
+      B.innerHTML = `<h3 style="margin:14px 0 6px;font-size:13px">Station count after close</h3>` + (mine.results.map((r) => `<div class="receipt"><div class="h"><span class="num">${fmt(r.total_ballots)} ballots</span>${r.superseded ? '<span class="pill p-none">CORRECTED</span>' : (r.flags || []).length ? '<span class="pill p-flag">⚠ CHECK</span>' : '<span class="pill p-ok">LATEST</span>'}</div>
+          <div class="small muted">ref ${r.id} · ${hhmm(r.received_at)} · ${fmt(r.rejected)} rejected${r.reason ? ` · “${esc(r.reason)}”` : ""}${(r.flags || []).length ? `<br><span style="color:var(--red)">${esc(r.flags.join("; "))}</span>` : ""}</div></div>`).join("") || '<p class="muted small">None yet.</p>') +
+        `<h3 style="margin:14px 0 6px;font-size:13px">Voters in (running totals sent)</h3>` + (mine.counts.map((c) => `<div class="receipt"><div class="h"><span class="num">${fmt(c.voted)}</span>${c.superseded ? '<span class="pill p-none">CORRECTED</span>' : (c.flags || []).length ? '<span class="pill p-flag">⚠ CHECK</span>' : ""}</div>
+          <div class="small muted">ref ${c.id} · server ${hhmm(c.received_at)}${c.kind === "correction" ? ` · corrects ${c.corrects_id}: “${esc(c.reason)}”` : ""}${(c.flags || []).length ? `<br><span style="color:var(--red)">${esc(c.flags.join("; "))}</span>` : ""}</div>
+          ${!c.superseded ? `<button class="btn sm ghost" style="margin-top:6px" data-corr="${c.id}">Correct this figure</button>` : ""}</div>`).join("") || '<p class="muted small">None yet.</p>');
+      $$("[data-corr]", B).forEach((b) => (b.onclick = () => {
+        const c = mine.counts.find((x) => String(x.id) === b.dataset.corr), v = parseInt(prompt(`Correct figure instead of ${c.voted}:`, c.voted), 10); if (!(v >= 0)) return;
+        const reason = (prompt("Reason (required):") || "").trim(); if (reason.length < 3) return toast("A reason is required.", true);
+        guard(async () => { const r = await send("countCorrection", { original: c.id, key: newKey(), voted: v, reason }); if (!r.queued) { T.n = v; tallySet("vot", st.id, T); await loadMine(); } }, "Correction sent. The original is kept on record.");
+      }));
+    }
+  }
+  paintNet(); tab(); REFRESH = loadMine; await guard(loadMine); flushOutbox();
+}
+
 // ------------------------------------------------------------------ WATCH ROOM (party-private)
+const cameBar = (present, expected, color) => !expected ? '<span class="muted small">no target</span>'
+  : `<div class="row" style="gap:6px;flex-wrap:nowrap"><div class="bar"><i style="width:${Math.min(100, (present / expected) * 100)}%;background:${color}"></i></div><span class="small num">${pct(present, expected)}</span></div>`;
 async function viewWatch() {
   const allowed = ME.role === "watch" ? CONSTS.filter((c) => ME.constituencies.includes(c.id)) : CONSTS;
   if (!allowed.length) { $("#main").innerHTML = '<div class="card">No constituency is assigned to you yet.</div>'; return; }
@@ -413,15 +639,16 @@ async function viewWatch() {
   $("#main").innerHTML = `<div class="partyhead"><b>${esc(P.name)} · Watch room</b><span class="private" style="background:rgba(255,255,255,.2)">🔒 Private to ${esc(P.short_name)}</span>
     <select class="inp" id="cSel" style="width:auto;margin-left:auto">${allowed.map((c) => `<option value="${c.id}" ${c.id === SEL.c ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
   <div class="grid kpis" style="margin-bottom:14px">
-    <div class="card kpi y"><div class="l">Our reps' turnout · unverified</div><div class="v num" id="wObs">—</div></div>
-    <div class="card kpi g"><div class="l">Reconciled by us</div><div class="v num" id="wRec">—</div></div>
-    <div class="card kpi p"><div class="l">🔒 Estimated ${esc(P.short_name)} supporters</div><div class="v num" id="wEst">—</div><div class="s" id="wEstS"></div></div>
-    <div class="card kpi k"><div class="l">Reporting / stale / silent</div><div class="v num" id="wSt">—</div></div>
+    <div class="card kpi pu"><div class="l">People voted here (shared figure)</div><div class="v num" id="wVoted">—</div><div class="s" id="wVotedS"></div></div>
+    <div class="card kpi p"><div class="l">🔒 Our supporters present</div><div class="v num" id="wEst">—</div><div class="s" id="wEstS"></div></div>
+    <div class="card kpi p"><div class="l">🔒 Still to come (expected − present)</div><div class="v num" id="wLeft">—</div><div class="s" id="wLeftS"></div></div>
+    <div class="card kpi y"><div class="l">Our reps' own turnout count</div><div class="v num" id="wObs">—</div><div class="s" id="wSt"></div></div>
     <div class="card kpi r"><div class="l">Needs attention</div><div class="v num" id="wAl">—</div></div>
   </div>
   <div class="grid split2">
-    <div class="card"><h3>Polling stations <span class="sp small muted" style="text-transform:none;letter-spacing:0">Stale = nothing for 60+ minutes</span></h3>
-      <div class="tw"><table><thead><tr><th>Station</th><th>Status</th><th class="r">Latest</th><th class="r">Reconciled</th><th class="r">🔒 Est. supporters</th><th class="r">Time</th><th class="noprint">Action</th></tr></thead><tbody id="wRows"></tbody></table></div></div>
+    <div class="card"><h3>Polling stations <span class="sp small muted" style="text-transform:none;letter-spacing:0">Stale = nothing from our rep for 60+ minutes · tap ✎ to set our expected supporters</span></h3>
+      <div class="tw"><table><thead><tr><th>Station</th><th class="r">Voted (shared)</th><th class="r">🔒 Expected</th><th class="r">🔒 Present</th><th>🔒 Of expected</th><th class="r">Our rep's count</th><th class="r">Time</th><th class="noprint">Action</th></tr></thead><tbody id="wRows"></tbody></table></div>
+      <p class="small muted" style="margin-bottom:0">"Present" is what our reps recognise coming in. It is an indication, not a vote count: people can change their mind in the booth.</p></div>
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Incidents &amp; discrepancies</h3><div class="feed" id="wInc"></div></div>
       <div class="card"><h3>Audit trail (our reports)</h3><div class="feed" id="wLog" style="max-height:300px"></div></div>
@@ -432,19 +659,30 @@ async function viewWatch() {
     const [st, inc, log] = await Promise.all([API.partyStations(SEL.c), API.incidents(SEL.c), API.subLog(SEL.c)]); stRows = st;
     const S = (k) => st.reduce((a, s) => a + (+s[k] || 0), 0);
     const goodObs = st.reduce((a, s) => a + (s.latest_status === "flagged" ? 0 : +s.latest_attendance || 0), 0);
-    $("#wObs").textContent = fmt(goodObs); $("#wRec").textContent = fmt(S("reconciled")); $("#wEst").textContent = fmt(S("est_supporters"));
-    $("#wEstS").textContent = goodObs ? pct(S("est_supporters"), goodObs) + " of turnout reported" : "";
+    const withT = st.filter((s) => s.expected), exp = S("expected"), presT = withT.reduce((a, s) => a + (+s.est_supporters || 0), 0);
+    $("#wVoted").textContent = fmt(S("voted")); $("#wVotedS").textContent = `${pct(S("voted"), S("electors_listed"))} of ${fmt(S("electors_listed"))} registered`;
+    $("#wEst").textContent = fmt(S("est_supporters")); $("#wEstS").textContent = exp ? `${pct(presT, exp)} of the ${fmt(exp)} we expect` : "set expected supporters with ✎";
+    $("#wLeft").textContent = exp ? fmt(Math.max(0, exp - presT)) : "—"; $("#wLeftS").textContent = exp ? `across ${withT.length} station(s) with a target` : "";
+    $("#wObs").textContent = fmt(goodObs);
     const rep = st.filter((s) => s.latest_at), stale = rep.filter((s) => mins(s.latest_at) > 60);
-    $("#wSt").textContent = `${rep.length - stale.length} / ${stale.length} / ${st.length - rep.length}`;
+    $("#wSt").textContent = `reporting ${rep.length - stale.length} · stale ${stale.length} · silent ${st.length - rep.length}`;
     $("#wAl").textContent = inc.filter((i) => i.status === "open").length;
-    $("#wRows").innerHTML = st.map((s) => `<tr><td><b>${esc(s.official_code)}</b><div class="small muted">${esc(s.station_name)} · ${esc(s.district)}${s.reps ? "" : ' · <span style="color:var(--amber)">no rep assigned</span>'}</div></td><td>${stationPill(s.latest_at)}</td>
-      <td class="r num">${fmt(s.latest_attendance)} ${s.latest_status ? statusPill(s.latest_status) : ""}${s.latest_status === "flagged" ? `<div class="small" style="color:var(--red)">${esc((s.latest_flags || []).join("; "))}</div>` : ""}</td>
-      <td class="r num">${fmt(s.reconciled)}</td><td class="r num">${fmt(s.est_supporters)}${s.est_confidence ? ` <span class="pill p-q">${esc(s.est_confidence)}</span>` : ""}</td><td class="r num">${hhmm(s.latest_at)}</td>
-      <td class="noprint">${s.latest_id && ["unverified", "flagged"].includes(s.latest_status) ? `<div class="row" style="gap:4px;flex-wrap:nowrap"><button class="btn sm" data-rec="${s.latest_id}">Verify</button><button class="btn sm ghost" data-ask="${s.latest_id}" title="Ask the representative to correct it">Ask fix</button>${s.latest_status === "flagged" ? `<button class="btn sm warn" data-rej="${s.latest_id}">Reject</button>` : ""}</div>` : ""}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No polling stations loaded for this constituency yet (system admin imports the official list).</td></tr>';
+    $("#wRows").innerHTML = st.map((s) => `<tr><td><b>${esc(s.official_code)}</b><div class="small muted">${esc(s.station_name)} · ${esc(s.district)}${s.reps ? "" : ' · <span style="color:var(--amber)">no rep assigned</span>'}</div></td>
+      <td class="r num"><b>${fmt(s.voted)}</b> ${s.voted !== null ? srcPill(s.voted_source) : ""}</td>
+      <td class="r num">${fmt(s.expected)} <button class="btn sm ghost noprint" data-exp="${s.station_id}" title="Set expected supporters">✎</button></td>
+      <td class="r num">${fmt(s.est_supporters)}${s.est_confidence ? ` <span class="pill p-q">${esc(s.est_confidence)}</span>` : ""}</td>
+      <td>${cameBar(+s.est_supporters || 0, +s.expected || 0, P.color)}</td>
+      <td class="r num">${fmt(s.latest_attendance)} ${s.latest_status ? statusPill(s.latest_status) : stationPill(null)}${s.latest_status === "flagged" ? `<div class="small" style="color:var(--red)">${esc((s.latest_flags || []).join("; "))}</div>` : ""}</td>
+      <td class="r num">${hhmm(s.latest_at)}</td>
+      <td class="noprint">${s.latest_id && ["unverified", "flagged"].includes(s.latest_status) ? `<div class="row" style="gap:4px;flex-wrap:nowrap"><button class="btn sm" data-rec="${s.latest_id}">Verify</button><button class="btn sm ghost" data-ask="${s.latest_id}" title="Ask the representative to correct it">Ask fix</button>${s.latest_status === "flagged" ? `<button class="btn sm warn" data-rej="${s.latest_id}">Reject</button>` : ""}</div>` : ""}</td></tr>`).join("") || '<tr><td colspan="8" class="muted">No polling stations loaded for this constituency yet (system admin imports the official list).</td></tr>';
     const act = (sel, dec, msg) => $$(sel).forEach((b) => (b.onclick = () => guard(async () => { const note = dec === "reconciled" ? null : prompt("Note for the record (optional):") || null; await API.reconcile(+b.dataset[sel.slice(6, 9)], dec, note); await load(); }, msg)));
     act("[data-rec]", "reconciled", "Marked reconciled. Recorded in the audit log.");
     act("[data-ask]", "correction_requested", "Correction requested from the representative.");
     act("[data-rej]", "rejected", "Report rejected. It no longer counts.");
+    $$("[data-exp]").forEach((b) => (b.onclick = () => { const s = stRows.find((x) => x.station_id === b.dataset.exp);
+      const v = prompt(`How many ${P.short_name} supporters do we expect to vote at ${s.official_code}? (a number only; leave empty to clear)`, s.expected ?? ""); if (v === null) return;
+      const n = v.trim() === "" ? null : parseInt(v, 10); if (n !== null && !(n >= 0)) return toast("Enter a whole number.", true);
+      guard(async () => { await API.setTarget(s.station_id, n); await load(); }, "Saved privately."); }));
     const code = (id) => (stRows.find((s) => s.station_id === id) || {}).official_code || "";
     $("#wInc").innerHTML = inc.map((i) => `<div class="it"><span class="sev ${i.severity}"></span><span class="t">${hhmm(i.created_at)}</span><div style="flex:1"><b>${esc(i.category)}</b> · <span class="muted">${esc(code(i.station_id))}</span><div>${esc(i.description || "")}</div>
       ${i.status === "open" ? `<button class="btn sm ghost" style="margin-top:4px" data-res="${i.id}">Mark resolved</button>` : `<div class="small" style="color:var(--green)">✓ ${esc(i.resolution_note || "Resolved")}</div>`}</div></div>`).join("") || '<p class="muted small">Nothing needs attention.</p>';
@@ -457,22 +695,24 @@ async function viewWatch() {
 // ------------------------------------------------------------------ PARTY HEAD OFFICE (party-private)
 async function viewHQ() {
   const P = ME.party;
+  if (!["rating", "came", "obs"].includes(SEL.hqMode)) SEL.hqMode = "rating";
   $("#main").innerHTML = `<div class="partyhead"><b>${esc(P.name)} · Head office</b><span class="private" style="background:rgba(255,255,255,.2)">🔒 Private — other parties cannot see this page</span></div>
   <div class="grid kpis" style="margin-bottom:14px">
-    <div class="card kpi y"><div class="l">Turnout reported by our reps</div><div class="v num" id="hObs">—</div><div class="s" id="hObsS"></div></div>
-    <div class="card kpi g"><div class="l">Reconciled</div><div class="v num" id="hRec">—</div></div>
-    <div class="card kpi p"><div class="l">🔒 Estimated ${esc(P.short_name)} supporters voted</div><div class="v num" id="hEst">—</div><div class="s">reps' estimates — not a vote count</div></div>
-    <div class="card kpi p"><div class="l">🔒 Estimated share of turnout</div><div class="v num" id="hShare">—</div><div class="s">where both figures exist</div></div>
+    <div class="card kpi pu"><div class="l">People voted (shared figure)</div><div class="v num" id="hVoted">—</div><div class="s" id="hVotedS"></div></div>
+    <div class="card kpi p"><div class="l">🔒 Our supporters present</div><div class="v num" id="hEst">—</div><div class="s">reps' counts — an indication, not votes</div></div>
+    <div class="card kpi p"><div class="l">🔒 Of our expected supporters</div><div class="v num" id="hCame">—</div><div class="s" id="hCameS"></div></div>
+    <div class="card kpi p"><div class="l">🔒 Still to come</div><div class="v num" id="hLeft">—</div><div class="s">expected − present, where a target is set</div></div>
     <div class="card kpi r"><div class="l">Open alerts</div><div class="v num" id="hAl">—</div></div>
   </div>
   <div class="grid split">
     <div class="card"><h3>Our private map</h3>
-      <div class="seg noprint" id="hMode" style="margin-bottom:10px"><button data-m="rating">Our strongholds</button><button data-m="share">Est. support %</button><button data-m="obs">Our turnout reports</button></div>
+      <div class="seg noprint" id="hMode" style="margin-bottom:10px"><button data-m="rating">Our strongholds</button><button data-m="came">% of expected who came</button><button data-m="obs">People voted</button></div>
       <div class="map" id="hMap">${mapSVG("hMap")}</div><div class="legend" id="hLeg"></div>
       <div id="rateBox"></div></div>
     <div class="grid" style="align-content:start">
+      <div class="card" style="border-top:4px solid var(--party)"><h3>🔒 Weak areas · where to send help <span class="sp small muted" style="text-transform:none;letter-spacing:0">lowest share of expected supporters so far</span></h3><div id="weak"></div></div>
       <div class="card"><h3>By constituency <span class="sp noprint"><button class="btn sm ghost" id="hCsv">⬇ CSV (private)</button></span></h3>
-        <div class="tw" style="max-height:470px"><table><thead><tr><th>Constituency</th><th>Our view</th><th class="r">Stations</th><th class="r">Turnout</th><th class="r">🔒 Est. supporters</th><th class="r">🔒 Est. %</th><th class="r">Alerts</th></tr></thead><tbody id="hRows"></tbody></table></div></div>
+        <div class="tw" style="max-height:470px"><table><thead><tr><th>Constituency</th><th>Our view</th><th class="r">Voted</th><th class="r">🔒 Expected</th><th class="r">🔒 Present</th><th>🔒 Of expected</th><th class="r">Alerts</th></tr></thead><tbody id="hRows"></tbody></table></div></div>
       <div class="card"><h3>Internal notes</h3><div class="row noprint"><input class="inp" id="noteIn" style="flex:1" maxlength="2000" placeholder="Add a note for your team"><button class="btn sm" id="noteBtn">Add</button></div><div class="feed" id="notes" style="margin-top:8px"></div></div>
     </div></div>`;
   let rows = [], ratings = {};
@@ -482,13 +722,13 @@ async function viewHQ() {
     const data = {};
     rows.forEach((r) => {
       const c = CONSTS.find((x) => x.id === r.constituency_id); if (!c) return;
-      if (SEL.hqMode === "rating") { const rt = r.rating || "unrated", w = (RATINGS.find((x) => x[0] === rt) || [])[2]; data[c.code] = { fill: ratingFill(rt), dark: !(w > 0.5) && w !== -1, label: { stronghold: "★", leaning: "↗", competitive: "≈", opponent_leaning: "↘", opponent_stronghold: "✕" }[rt] || "", value: +r.observed }; }
-      else if (SEL.hqMode === "share") { const f = r.observed ? r.est_supporters / r.observed : 0; data[c.code] = { fill: r.observed ? hexMix(P.color, 0.15 + 0.85 * Math.min(1, f / 0.7)) : "#E5E7E4", dark: f < 0.4, label: r.observed ? Math.round(f * 100) + "%" : "—", value: +r.observed }; }
-      else { const max = Math.max(100, ...rows.map((x) => +x.observed)), f = r.observed / max; data[c.code] = { fill: ramp(f), dark: f < 0.45, label: fmt(r.observed), value: +r.observed }; }
+      if (SEL.hqMode === "rating") { const rt = r.rating || "unrated", w = (RATINGS.find((x) => x[0] === rt) || [])[2]; data[c.code] = { fill: ratingFill(rt), dark: !(w > 0.5) && w !== -1, label: { stronghold: "★", leaning: "↗", competitive: "≈", opponent_leaning: "↘", opponent_stronghold: "✕" }[rt] || "", value: +r.voted }; }
+      else if (SEL.hqMode === "came") { const f = r.expected ? r.est_supporters / r.expected : 0; data[c.code] = { fill: r.expected ? hexMix(P.color, 0.12 + 0.88 * Math.min(1, f)) : "#E5E7E4", dark: f < 0.45, label: r.expected ? Math.round(f * 100) + "%" : "—", value: +r.est_supporters }; }
+      else { const max = Math.max(100, ...rows.map((x) => +x.voted)), f = r.voted / max; data[c.code] = { fill: ramp(f), dark: f < 0.45, label: fmt(r.voted), value: +r.voted }; }
     });
     paintMap("hMap", data, SEL.rateC ? CONSTS.find((c) => c.id === SEL.rateC)?.code : null);
     $("#hLeg").innerHTML = SEL.hqMode === "rating" ? RATINGS.map(([k, l]) => `<span class="lg"><i style="background:${ratingFill(k)}"></i>${l}</span>`).join("") + '<span class="small">· tap a constituency to change it</span>'
-      : SEL.hqMode === "share" ? `<span>0%</span><span class="ramp" style="background:linear-gradient(90deg,${hexMix(P.color, 0.15)},${P.color})"></span><span>70%+ of turnout estimated as ours</span>` : `<span>0</span><span class="ramp"></span><span>most reported</span>`;
+      : SEL.hqMode === "came" ? `<span>0% (weak)</span><span class="ramp" style="background:linear-gradient(90deg,${hexMix(P.color, 0.12)},${P.color})"></span><span>100% of expected came</span><span class="small">· grey = no target set</span>` : `<span>0</span><span class="ramp"></span><span>most voted</span>`;
   }
   function rateBox() {
     const c = SEL.rateC, el = $("#rateBox"); if (!c) { el.innerHTML = ""; return; }
@@ -500,22 +740,28 @@ async function viewHQ() {
     $("#rateClose").onclick = () => { SEL.rateC = null; rateBox(); paint(); };
     $("#openWatch").onclick = () => { SEL.c = c; go("watch"); };
   }
-  bindMap("hMap", (code) => { const c = cByCode(code), r = rows.find((x) => x.constituency_id === c.id) || {}; return `<b>${esc(c.name)}</b>Our view: ${(RATINGS.find((x) => x[0] === (r.rating || "unrated")) || [])[1]}<br>Turnout reported: ${fmt(r.observed)}<br>🔒 Est. supporters: ${fmt(r.est_supporters)} (${pct(r.est_supporters, r.observed)})`; },
+  bindMap("hMap", (code) => { const c = cByCode(code), r = rows.find((x) => x.constituency_id === c.id) || {}; return `<b>${esc(c.name)}</b>Our view: ${(RATINGS.find((x) => x[0] === (r.rating || "unrated")) || [])[1]}<br>People voted: ${fmt(r.voted)} (${pct(r.voted, r.electors_listed)})<br>🔒 Supporters present: ${fmt(r.est_supporters)} of ${fmt(r.expected)} expected`; },
     (code) => { const c = cByCode(code); if (SEL.hqMode === "rating") { SEL.rateC = c.id; rateBox(); paint(); } else { SEL.c = c.id; go("watch"); } });
   $("#noteBtn").onclick = () => guard(async () => { const v = $("#noteIn").value.trim(); if (!v) return; await API.addNote(v); $("#noteIn").value = ""; loadNotes(); }, "Note saved privately.");
-  $("#hCsv").onclick = () => csv(`PRIVATE-${P.short_name}-head-office.csv`, [["PRIVATE — " + P.name + " internal estimates, not official results"], ["constituency", "our_view", "stations_reporting", "stations_total", "turnout_reported", "reconciled", "est_supporters", "est_share", "open_alerts"],
-    ...rows.map((r) => [cName(r.constituency_id), r.rating || "", r.stations_reporting, r.stations_total, r.observed, r.reconciled, r.est_supporters, r.observed ? (r.est_supporters / r.observed).toFixed(3) : "", r.open_alerts])]);
+  $("#hCsv").onclick = () => csv(`PRIVATE-${P.short_name}-head-office.csv`, [["PRIVATE — " + P.name + " internal figures, not votes and not official results"], ["constituency", "our_view", "people_voted", "registered", "expected_supporters", "supporters_present", "share_of_expected", "our_reps_turnout", "open_alerts"],
+    ...rows.map((r) => [cName(r.constituency_id), r.rating || "", r.voted, r.electors_listed, r.expected, r.est_supporters, r.expected ? (r.est_supporters / r.expected).toFixed(3) : "", r.observed, r.open_alerts])]);
   async function loadNotes() { const n = await API.notes(); $("#notes").innerHTML = n.map((x) => `<div class="it"><span class="t">${hhmm(x.created_at)}</span><div>${esc(x.body)}<div class="small muted">${esc(x.profiles?.full_name || "")}</div></div></div>`).join("") || '<p class="muted small">No notes yet.</p>'; }
   async function load() {
-    const [s, rt] = await Promise.all([API.partySummary(), API.ratings()]); rows = s; ratings = Object.fromEntries(rt.map((r) => [r.constituency_id, r]));
-    const T = (k) => rows.reduce((a, r) => a + +r[k], 0), both = rows.filter((r) => +r.observed && +r.est_supporters);
-    $("#hObs").textContent = fmt(T("observed")); $("#hObsS").textContent = `${T("stations_reporting")} of ${T("stations_total")} stations`;
-    $("#hRec").textContent = fmt(T("reconciled")); $("#hEst").textContent = fmt(T("est_supporters"));
-    $("#hShare").textContent = pct(both.reduce((a, r) => a + +r.est_supporters, 0), both.reduce((a, r) => a + +r.observed, 0)); $("#hAl").textContent = T("open_alerts");
+    const [s, rt, st] = await Promise.all([API.partySummary(), API.ratings(), API.partyStations(null)]); rows = s; ratings = Object.fromEntries(rt.map((r) => [r.constituency_id, r]));
+    const T = (k) => rows.reduce((a, r) => a + +r[k], 0), withT = st.filter((x) => x.expected), presT = withT.reduce((a, x) => a + (+x.est_supporters || 0), 0), expT = withT.reduce((a, x) => a + +x.expected, 0);
+    $("#hVoted").textContent = fmt(T("voted")); $("#hVotedS").textContent = `${pct(T("voted"), T("electors_listed"))} of ${fmt(T("electors_listed"))} registered`;
+    $("#hEst").textContent = fmt(T("est_supporters")); $("#hCame").textContent = expT ? pct(presT, expT) : "—"; $("#hCameS").textContent = expT ? `${fmt(presT)} of ${fmt(expT)} expected` : "no targets set yet";
+    $("#hLeft").textContent = expT ? fmt(Math.max(0, expT - presT)) : "—"; $("#hAl").textContent = T("open_alerts");
     $("#hRows").innerHTML = rows.slice().sort((a, b) => cName(a.constituency_id).localeCompare(cName(b.constituency_id))).map((r) => `<tr class="click" data-id="${r.constituency_id}"><td><b>${esc(cName(r.constituency_id))}</b></td>
-      <td><span class="lg"><i style="background:${ratingFill(r.rating || "unrated")}"></i>${(RATINGS.find((x) => x[0] === (r.rating || "unrated")) || [])[1]}</span></td><td class="r num">${r.stations_reporting}/${r.stations_total}</td>
-      <td class="r num">${fmt(r.observed)}</td><td class="r num">${fmt(r.est_supporters)}</td><td class="r num">${pct(r.est_supporters, r.observed)}</td><td class="r">${r.open_alerts ? `<span class="pill p-flag">${r.open_alerts}</span>` : "—"}</td></tr>`).join("");
+      <td><span class="lg"><i style="background:${ratingFill(r.rating || "unrated")}"></i>${(RATINGS.find((x) => x[0] === (r.rating || "unrated")) || [])[1]}</span></td>
+      <td class="r num">${fmt(r.voted)}</td><td class="r num">${fmt(r.expected || null)}</td><td class="r num">${fmt(r.est_supporters)}</td><td>${cameBar(+r.est_supporters, +r.expected, P.color)}</td><td class="r">${r.open_alerts ? `<span class="pill p-flag">${r.open_alerts}</span>` : "—"}</td></tr>`).join("");
     $$("#hRows tr").forEach((tr) => (tr.onclick = () => { SEL.c = +tr.dataset.id; go("watch"); }));
+    const silent = withT.filter((x) => x.est_supporters === null), weak = withT.filter((x) => x.est_supporters !== null).map((x) => ({ ...x, f: x.est_supporters / x.expected })).sort((a, b) => a.f - b.f).slice(0, 10);
+    $("#weak").innerHTML = weak.length ? `<div class="tw"><table><thead><tr><th>Station</th><th class="r">Expected</th><th class="r">Present</th><th class="r">Still to come</th><th>Of expected</th></tr></thead><tbody>${weak.map((x) => `<tr class="click" data-c="${x.constituency_id}"><td><b>${esc(x.official_code)}</b><div class="small muted">${esc(cName(x.constituency_id))} · ${esc(x.station_name)}</div></td><td class="r num">${fmt(x.expected)}</td><td class="r num">${fmt(x.est_supporters)}</td><td class="r num"><b>${fmt(Math.max(0, x.expected - (+x.est_supporters || 0)))}</b></td><td>${cameBar(+x.est_supporters || 0, +x.expected, P.color)}</td></tr>`).join("")}</tbody></table></div>
+      <p class="small muted" style="margin-bottom:0">Only stations where we set an expected number and our person has sent a count. An indication, not a prediction: people can change their mind in the booth.</p>`
+      : '<p class="muted small">Set expected supporters per station in the watch rooms (✎) to see where turnout of our supporters is lowest.</p>';
+    if (silent.length) $("#weak").insertAdjacentHTML("beforeend", `<p class="small" style="color:var(--amber);margin-bottom:0">⚠ ${silent.length} station(s) with a target have sent no supporter count yet: ${silent.slice(0, 8).map((x) => esc(x.official_code)).join(", ")}${silent.length > 8 ? "…" : ""}</p>`);
+    $$("#weak tr[data-c]").forEach((tr) => (tr.onclick = () => { SEL.c = +tr.dataset.c; go("watch"); }));
     paint();
   }
   REFRESH = load; await guard(async () => { await load(); await loadNotes(); });
@@ -532,12 +778,13 @@ async function viewTeam() {
         <label class="f">Role</label><select class="inp" id="iRole"><option value="rep">Station representative (one polling station)</option><option value="watch">Watch room (one constituency)</option><option value="hq">Head office (sees everything for ${esc(P.short_name)})</option><option value="party_admin">Party administrator</option></select>
         <div id="iWhere"><label class="f">Constituency</label><select class="inp" id="iC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
           <div id="iStWrap"><label class="f">Polling station</label><select class="inp" id="iS"></select></div></div>
+        <div id="iJobWrap"><label class="f">Their job at the station</label><select class="inp" id="iJob"><option value="inside">Inside the station: live count of everyone voting (+1 each voter)</option><option value="outside">Outside the station: our supporters they recognise (+1 each supporter)</option><option value="both">Both jobs (one person)</option></select></div>
         <label class="f">Person's name (for your records)</label><input class="inp" id="iLabel" maxlength="80">
         <button class="btn" style="margin-top:12px" id="iGo">Create invite</button><div id="iOut" style="margin-top:12px"></div></div>
       <div class="card"><h3>Sharing with the National Watch</h3>
-        <label class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>Our reps' <b>turnout totals</b> → National Watch</span><input type="checkbox" id="shC" ${P.share_counts ? "checked" : ""}></label>
+        <label class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>Our reps' <b>turnout totals</b> → National Watch <span class="small muted">(shown beside the neutral counter's figure; used only where no counter reports)</span></span><input type="checkbox" id="shC" ${P.share_counts ? "checked" : ""}></label>
         <label class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>Count of our <b>open incidents</b> → National Watch</span><input type="checkbox" id="shI" ${P.share_incidents ? "checked" : ""}></label>
-        ${["Supporter estimates", "Stronghold map", "Internal notes", "Team list"].map((x) => `<div class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>${x}</span><span class="pill p-none">NEVER SHARED</span></div>`).join("")}
+        ${["Supporters present", "Expected supporters", "Stronghold map", "Internal notes", "Team list"].map((x) => `<div class="row" style="justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)"><span>${x}</span><span class="pill p-none">NEVER SHARED</span></div>`).join("")}
         <p class="small muted" style="margin-bottom:0">Changes take effect immediately and are recorded in the audit log.</p></div>
     </div>
     <div class="grid" style="align-content:start">
@@ -547,13 +794,14 @@ async function viewTeam() {
     </div></div>`;
   let stations = [];
   const fillSt = async () => { stations = await API.stations(+$("#iC").value); $("#iS").innerHTML = stations.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || "<option value=''>No stations loaded yet</option>"; };
-  const where = () => { const r = $("#iRole").value; $("#iWhere").classList.toggle("hide", !["rep", "watch"].includes(r)); $("#iStWrap").classList.toggle("hide", r !== "rep"); };
+  const where = () => { const r = $("#iRole").value; $("#iWhere").classList.toggle("hide", !["rep", "watch"].includes(r)); $("#iStWrap").classList.toggle("hide", r !== "rep"); $("#iJobWrap").classList.toggle("hide", r !== "rep"); };
   $("#iRole").onchange = where; $("#iC").onchange = fillSt; where(); fillSt();
   $("#iGo").onclick = () => guard(async () => {
-    const role = $("#iRole").value, label = $("#iLabel").value.trim();
+    const role = $("#iRole").value, name = $("#iLabel").value.trim(), job = role === "rep" ? $("#iJob").value : null;
+    const label = job ? `${name || "Rep"} (${JOBS[job].short})` : name;
     const code = await API.createInvite({ role, station: role === "rep" ? $("#iS").value || null : null, constituency: role === "watch" ? +$("#iC").value : null, label });
-    const link = `${location.origin}${location.pathname}#invite=${code}`;
-    const msg = `${label ? label + ", y" : "Y"}ou are invited to Vote Watch Dominica for ${P.name} as ${ROLE[role]}.\nOpen: ${link}\nInvite code: ${code}\nThis code is for you only. Do not share it.`;
+    const link = `${location.origin}${location.pathname}#invite=${code}${job ? "&job=" + job : ""}`;
+    const msg = `${name ? name + ", y" : "Y"}ou are invited to Vote Watch Dominica for ${P.name} as ${ROLE[role]}${job ? ` — ${JOBS[job].long}` : ""}.\nOpen: ${link}\nInvite code: ${code}\nThis code is for you only. Do not share it.`;
     $("#iOut").innerHTML = `<div class="codebox">${esc(code)}</div><textarea class="inp" rows="5" style="margin-top:8px" readonly>${esc(msg)}</textarea><button class="btn sm ghost" id="copy" style="margin-top:6px">Copy message to send by WhatsApp/SMS</button>`;
     $("#copy").onclick = () => navigator.clipboard.writeText(msg).then(() => toast("Copied."));
     $("#iLabel").value = ""; loadLists();
@@ -625,6 +873,91 @@ async function viewAdmin() {
   }
   REFRESH = null; await guard(load);
 }
+// ------------------------------------------------------------------ SYSTEM ADMIN: neutral counters, candidates, official figures
+async function viewCount() {
+  $("#main").innerHTML = `<div class="row" style="margin-bottom:12px"><b style="font-size:16px">Counters &amp; results</b><span class="muted small">Neutral station counters, candidates, and official figures from the Electoral Office. You cannot see any party's private data.</span></div>
+  <div class="grid two">
+    <div class="grid" style="align-content:start">
+      <div class="card"><h3>Invite a neutral station counter</h3>
+        <p class="small muted" style="margin-top:0">One per polling station. A counter belongs to no party; their running total of voters is the figure every party sees on the National Watch.</p>
+        <label class="f">Constituency</label><select class="inp" id="kC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
+        <label class="f">Polling station</label><select class="inp" id="kS"></select>
+        <label class="f">Person's name (for your records)</label><input class="inp" id="kLabel" maxlength="80">
+        <button class="btn" style="margin-top:12px" id="kGo">Create counter invite</button><div id="kOut" style="margin-top:12px"></div></div>
+      <div class="card"><h3>Counters</h3><div class="tw" style="max-height:320px"><table><thead><tr><th>Name</th><th>Station</th><th>Status</th><th></th></tr></thead><tbody id="kRows"></tbody></table></div></div>
+    </div>
+    <div class="grid" style="align-content:start">
+      <div class="card"><h3>Candidates</h3>
+        <p class="small muted" style="margin-top:0">Enter each constituency's candidates after Nomination Day, from the official list. They appear in the counters' results form and on the results map.</p>
+        <label class="f">Constituency</label><select class="inp" id="dC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
+        <div id="dList" style="margin-top:8px"></div>
+        <div class="grid" style="grid-template-columns:2fr 1.4fr;gap:6px;margin-top:10px"><div><label class="f">Candidate's name</label><input class="inp" id="dName" maxlength="120"></div>
+          <div><label class="f">Party</label><select class="inp" id="dParty"></select></div></div>
+        <div class="grid" style="grid-template-columns:2fr auto auto;gap:6px;align-items:end" id="dIndWrap"><div><label class="f">Label (e.g. Independent)</label><input class="inp" id="dLabel" value="Independent" maxlength="40"></div><div><label class="f">Colour</label><input type="color" id="dColor" value="#8C8C8C" style="height:38px;width:50px;border:0"></div><div></div></div>
+        <button class="btn" style="margin-top:10px" id="dGo">Add candidate</button></div>
+      <div class="card"><h3>Official figures (Electoral Office)</h3>
+        <p class="small muted" style="margin-top:0">When the official poll-book turnout or the official station count is announced, enter it here. It replaces the counter's figure on the National Watch and is marked OFFICIAL.</p>
+        <label class="f">Constituency</label><select class="inp" id="oC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
+        <label class="f">Polling station</label><select class="inp" id="oS"></select>
+        <div class="seg" id="oMode" style="margin-top:10px"><button data-m="turnout" class="on">Official turnout</button><button data-m="results">Official station count</button></div>
+        <div id="oBody" style="margin-top:10px"></div></div>
+    </div></div>`;
+  const parties = await API.parties();
+  $("#dParty").innerHTML = parties.map((p) => `<option value="${p.id}">${esc(p.short_name)} — ${esc(p.name)}</option>`).join("") + '<option value="">Independent / not on the platform</option>';
+  const indToggle = () => $("#dIndWrap").classList.toggle("hide", $("#dParty").value !== ""); $("#dParty").onchange = indToggle; indToggle();
+  let kStations = [], oStations = [], oMode = "turnout";
+  const fill = async (sel, cid) => { const xs = await API.stations(cid); $(sel).innerHTML = xs.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || "<option value=''>No stations loaded yet</option>"; return xs; };
+  $("#kC").onchange = async () => (kStations = await fill("#kS", +$("#kC").value));
+  $("#oC").onchange = async () => { oStations = await fill("#oS", +$("#oC").value); oBody(); };
+  $("#oS").onchange = () => oBody();
+  $$("#oMode button").forEach((b) => (b.onclick = () => { oMode = b.dataset.m; $$("#oMode button").forEach((x) => x.classList.toggle("on", x === b)); oBody(); }));
+  kStations = await fill("#kS", +$("#kC").value); oStations = await fill("#oS", +$("#oC").value);
+  $("#kGo").onclick = () => guard(async () => {
+    const sid = $("#kS").value; if (!sid) throw new Error("Load the official station list first."); const st = kStations.find((x) => x.id === sid), label = $("#kLabel").value.trim();
+    const code = await API.createInvite({ role: "counter", station: sid, label: label || "Counter " + st.official_code });
+    const link = `${location.origin}${location.pathname}#invite=${code}`;
+    const msg = `${label ? label + ", y" : "Y"}ou are invited to Vote Watch Dominica as the NEUTRAL station counter for ${st.official_code} (${st.name}).\nOpen: ${link}\nInvite code: ${code}\nThis code is for you only. Do not share it.`;
+    $("#kOut").innerHTML = `<div class="codebox">${esc(code)}</div><textarea class="inp" rows="5" style="margin-top:8px" readonly>${esc(msg)}</textarea><button class="btn sm ghost" id="kCopy" style="margin-top:6px">Copy message to send by WhatsApp/SMS</button>`;
+    $("#kCopy").onclick = () => navigator.clipboard.writeText(msg).then(() => toast("Copied.")); $("#kLabel").value = ""; loadCounters();
+  });
+  async function loadCounters() {
+    const [mem, inv, all] = await Promise.all([API.members(), API.invites(), API.stations()]); const stName = (id) => (all.find((s) => s.id === id) || {}).official_code || "—";
+    $("#kRows").innerHTML = mem.filter((m) => m.role === "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b></td><td class="small">${esc((m.assignments || []).map((a) => stName(a.station_id)).join(", "))}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td>
+      <td><button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button></td></tr>`).join("") +
+      inv.filter((i) => i.role === "counter" && !i.used_by && !i.revoked).map((i) => `<tr><td><code>${esc(i.code)}</code> ${esc(i.label || "")}</td><td class="small">${esc(stName(i.station_id))}</td><td><span class="pill p-unv">INVITE OPEN</span></td><td><button class="btn sm warn" data-rev="${esc(i.code)}">Revoke</button></td></tr>`).join("") || '<tr><td colspan="4" class="muted">No counters yet.</td></tr>';
+    $$("#kRows [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this counter's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); loadCounters(); }, "Access updated."); }));
+    $$("#kRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadCounters(); }, "Invite revoked.")));
+  }
+  async function loadCands() {
+    const cs = await API.candidates(+$("#dC").value, true);
+    $("#dList").innerHTML = cs.map((c) => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)${c.active ? "" : ";opacity:.5"}"><span style="width:14px;height:14px;border-radius:50%;background:${esc(c.color)}"></span><b>${esc(c.name)}</b><span class="muted">${esc(c.party)}</span>
+      <button class="btn sm ${c.active ? "warn" : "ghost"}" style="margin-left:auto" data-cand="${c.id}" data-on="${c.active ? 0 : 1}">${c.active ? "Remove" : "Restore"}</button></div>`).join("") || '<p class="muted small">No candidates entered for this constituency yet.</p>';
+    $$("[data-cand]").forEach((b) => (b.onclick = () => guard(async () => { await API.setCandidateActive(b.dataset.cand, b.dataset.on === "1"); loadCands(); }, "Candidate list updated.")));
+  }
+  $("#dC").onchange = loadCands;
+  $("#dGo").onclick = () => guard(async () => {
+    const name = $("#dName").value.trim(), party = $("#dParty").value || null; if (name.length < 2) throw new Error("Type the candidate's name.");
+    await API.addCandidate({ constituency: +$("#dC").value, name, party, label: party ? null : $("#dLabel").value.trim() || "Independent", color: party ? null : $("#dColor").value });
+    $("#dName").value = ""; loadCands();
+  }, "Candidate added.");
+  async function oBody() {
+    const el = $("#oBody"), sid = $("#oS").value, st = oStations.find((x) => x.id === sid);
+    if (!st) { el.innerHTML = '<p class="muted small">Load the official station list first.</p>'; return; }
+    const mine = await API.myCounts(st.id), offC = mine.counts.find((c) => c.source === "official" && !c.superseded), offR = mine.results.find((r) => r.source === "official" && !r.superseded);
+    if (oMode === "turnout") {
+      el.innerHTML = `${offC ? `<div class="receipt">Official turnout already entered: <b class="num">${fmt(offC.voted)}</b> at ${hhmm(offC.received_at)}. Entering a new figure replaces it (the old one stays on record).</div>` : ""}
+        <label class="f">Official number who voted at ${esc(st.official_code)} (poll book)</label><input class="inp bigin num" id="oV" type="number" inputmode="numeric" min="0">
+        <button class="btn big dark" style="margin-top:12px" id="oGo">Save official turnout</button>`;
+      $("#oGo").onclick = () => guard(async () => { const v = parseInt($("#oV").value, 10); if (!(v >= 0)) throw new Error("Enter a whole number.");
+        if (!confirm(`Save ${v} as the OFFICIAL turnout for ${st.official_code}?`)) return; await API.submitCount({ station: st.id, key: newKey(), voted: v, note: "official poll book" }); oBody(); }, "Official turnout saved.");
+    } else {
+      const ns = await API.nationalStations(st.constituency_id), voted = ns.find((n) => n.station_id === st.id)?.voted;
+      await resultsForm(el, st, { previous: offR, voted, official: true, onSent: () => setTimeout(oBody, 1500) });
+    }
+  }
+  oBody(); loadCands(); REFRESH = null; await guard(loadCounters);
+}
+
 function parseCSV(text) {
   const rows = []; let row = [], cell = "", q = false;
   for (let i = 0; i < text.length; i++) {
@@ -639,7 +972,7 @@ function parseCSV(text) {
 }
 
 // ------------------------------------------------------------------ boot
-const VIEWS = { national: viewNational, station: viewStation, watch: viewWatch, hq: viewHQ, team: viewTeam, admin: viewAdmin };
+const VIEWS = { national: viewNational, station: viewStation, watch: viewWatch, hq: viewHQ, team: viewTeam, admin: viewAdmin, counter: viewCounter, count: viewCount };
 let booted = false, bootSeq = 0;
 async function boot() {
   const my = ++bootSeq, stale = () => my !== bootSeq; // only the most recent start-up may draw the screen

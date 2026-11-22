@@ -26,7 +26,7 @@
     onChange(cb) {
       listeners.push(cb);
       const ch = sb.channel("vw-live");
-      ["submissions", "incidents", "support_estimates"].forEach((t) =>
+      ["submissions", "incidents", "support_estimates", "station_counts", "station_results"].forEach((t) =>
         ch.on("postgres_changes", { event: "*", schema: "public", table: t }, () => cb(t)));
       ch.subscribe();
       setInterval(() => cb("poll"), 15000); // national figures include other parties' shared data → poll
@@ -62,7 +62,30 @@
     nationalStations: (cid) => rpc("national_stations", { p_constituency: cid }),
     nationalTimeline() { const d = new Date(); d.setHours(6, 0, 0, 0); return rpc("national_timeline", { p_from: d.toISOString() }); },
     partySummary: () => rpc("party_summary"),
-    partyStations: (cid) => rpc("party_stations", { p_constituency: cid }),
+    partyStations: (cid) => rpc("party_stations", { p_constituency: cid ?? null }),
+    nationalResults: () => rpc("national_results"),
+    nationalStationResults: (cid) => rpc("national_station_results", { p_constituency: cid }),
+    async candidates(cid, all) {
+      let q = sb.from("candidates").select("*, parties(short_name)").order("ballot_order").order("name");
+      if (cid) q = q.eq("constituency_id", cid);
+      if (!all) q = q.eq("active", true);
+      return ok(await q).map((c) => ({ ...c, party: c.parties?.short_name || c.label || "Independent" }));
+    },
+    addCandidate: (x) => rpc("add_candidate", { p_constituency: x.constituency, p_name: x.name, p_party: x.party || null, p_label: x.label || null, p_color: x.color || null, p_order: x.order || 0 }),
+    setCandidateActive: (id, active) => rpc("set_candidate_active", { p_id: id, p_active: active }),
+    submitCount: (x) => rpc("submit_count", { p_station: x.station, p_client_key: x.key, p_voted: x.voted, p_note: x.note || null, p_device_time: x.device_time }),
+    correctCount: (x) => rpc("correct_count", { p_original: x.original, p_client_key: x.key, p_voted: x.voted, p_reason: x.reason }),
+    submitResults: (x) => rpc("submit_results", { p_station: x.station, p_client_key: x.key, p_votes: x.votes, p_rejected: x.rejected, p_corrects: x.corrects || null, p_reason: x.reason || null }),
+    async myCounts(stationId) {
+      const [c, r] = await Promise.all([
+        sb.from("station_counts").select("*").eq("station_id", stationId).order("received_at", { ascending: false }).limit(100),
+        sb.from("station_results").select("*").eq("station_id", stationId).order("received_at", { ascending: false }).limit(20),
+      ]);
+      const counts = ok(c), results = ok(r), cor = new Set(counts.map((x) => x.corrects_id).filter(Boolean)), rcor = new Set(results.map((x) => x.corrects_id).filter(Boolean));
+      return { counts: counts.map((x) => ({ ...x, superseded: cor.has(x.id) })), results: results.map((x) => ({ ...x, superseded: rcor.has(x.id) })) };
+    },
+    setTarget: (station, expected) => rpc("set_station_target", { p_station: station, p_expected: expected }),
+    async myTarget(stationId) { const r = ok(await sb.from("party_station_targets").select("expected").eq("station_id", stationId).maybeSingle()); return r ? r.expected : null; },
     async subLog(cid) {
       const ids = (await this.stations(cid)).map((s) => s.id);
       if (!ids.length) return [];
