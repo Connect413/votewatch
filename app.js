@@ -178,8 +178,8 @@ function paintShell() {
   const disclaimer = "Independent monitoring platform, not the Electoral Office. Counts only: no names and no individual ballots are collected. Results shown are unofficial.";
   if (API.mode === "demo") {
     const d = API.demo;
-    $("#banner").innerHTML = `<b>DEMO MODE · SYNTHETIC DATA</b><span>View as:</span><select id="persona">${d.people.map((p) => `<option value="${p.id}" ${p.id === d.persona ? "selected" : ""}>${esc(p.full_name)}</option>`).join("")}</select>
-      <button id="play">${d.playing ? "❚❚ Pause" : "▶ Play"}</button><select id="speed">${[2, 5, 15].map((s) => `<option value="${s}" ${s === d.speed ? "selected" : ""}>${s} min/sec</option>`).join("")}</select>
+    $("#banner").innerHTML = `<b>DEMO MODE · SYNTHETIC DATA</b><span>View as:</span><select id="persona">${d.people.filter((p) => !["sys_admin", "media"].includes(p.role)).map((p) => `<option value="${p.id}" ${p.id === d.persona ? "selected" : ""}>${esc(p.full_name)}</option>`).join("")}</select>
+      <button id="play">${d.playing ? "❚❚ Pause" : "▶ Play"}</button><select id="speed">${[1, 2, 5, 15].map((s) => `<option value="${s}" ${s === d.speed ? "selected" : ""}>${s} min/sec</option>`).join("")}</select>
       <button id="jump">Jump to 12:00</button><button id="jump2">Jump to 17:00 close</button><button id="jump3">Jump to 19:30 count</button><label class="row" style="gap:4px"><input type="checkbox" id="noSignal" ${window.VW_FORCE_OFFLINE ? "checked" : ""}> Simulate no signal</label><span class="small">${disclaimer}</span>`;
     $("#persona").onchange = (e) => d.setPersona(e.target.value);
     $("#play").onclick = (e) => (e.target.textContent = d.toggle() ? "❚❚ Pause" : "▶ Play");
@@ -442,7 +442,8 @@ async function viewStation() {
   let mine = { subs: [], estimates: [], incidents: [] };
   const lastGood = () => mine.subs.find((s) => s.status !== "superseded" && s.status !== "rejected");
   const lastEst = () => mine.estimates[0];
-  async function loadMine() { mine = await API.myReports(st.id); if (SEL.repTab === "history") tab(); else { const l = $("#lastTot"); if (l) l.innerHTML = lastTotHtml(); } }
+  async function loadMine() { mine = await API.myReports(st.id); const l1 = lastGood(), e1 = lastEst(), Ta = tallyGet("att", st.id), Ts = tallyGet("sup", st.id);
+    if (SEL.repTab === "history" || (SEL.repTab === "turnout" && l1 && l1.attendance > Ta.n && !Ta.touched) || (SEL.repTab === "support" && e1 && e1.estimated_supporters > Ts.n)) tab(); else { const l = $("#lastTot"); if (l) l.innerHTML = lastTotHtml(); } }
   const lastTotHtml = () => { const l = lastGood(); return l ? `${fmt(l.attendance)} <span class="small muted">at ${hhmm(l.received_at)}</span> ${statusPill(l.status)}` : '<span class="muted">No report yet</span>'; };
   function confirmBox(r, retry) {
     const el = $("#sendMsg");
@@ -1096,7 +1097,7 @@ async function boot() {
     const cs = await API.constituencies(); if (stale()) return; CONSTS = cs;
     try { SETTINGS = await API.appSettings(); } catch (e) { SETTINGS = null; } if (stale()) return;
     const tabs = tabsFor(ME.role).map((t) => t[0]);
-    if (!tabs.includes(VIEW)) VIEW = tabs[0];
+    if (!tabs.includes(VIEW)) VIEW = API.mode === "demo" && tabs.includes("national") ? "national" : tabs[0];
     paintShell(); go(VIEW);
     flushOutbox();
   } catch (e) { $("#main").innerHTML = `<div class="card"><b>Could not load.</b><p class="small">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Try again</button></div>`; }

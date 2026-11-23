@@ -9,7 +9,7 @@
   const day = new Date(); day.setHours(0, 0, 0, 0);
   const OPEN = 7 * 60, CLOSE = 17 * 60;
   const END = CLOSE + 330; // simulation runs to 22:30 so the evening count and declarations can be shown
-  let simMin = OPEN, speed = 5, playing = true;
+  let simMin = OPEN, speed = 1, playing = true;
   const T = (m) => new Date(day.getTime() + m * 60000).toISOString();
   const nowIso = () => T(simMin);
 
@@ -37,12 +37,12 @@
   const trueVoted = (s, t) => { const x = Math.max(0, Math.min(1, (Math.min(t, CLOSE) - OPEN) / (CLOSE - OPEN))); return Math.round(s.electors_listed * sim[s.id].rate * (1 - Math.pow(1 - x, 1.7))); };
 
   const people = [
-    { id: "u-rep", full_name: "Demo Rep (Alpha)", role: "rep", party_id: "pA", station: "RNO-1", email: "rep@demo" },
-    { id: "u-cnt", full_name: "Demo Neutral Counter (RNO-2)", role: "counter", party_id: null, station: "RNO-2", email: "counter@demo" },
-    { id: "u-watch", full_name: "Demo Watch Room (Alpha)", role: "watch", party_id: "pA", constituency: 15, email: "watch@demo" },
-    { id: "u-hq", full_name: "Demo Head Office (Alpha)", role: "hq", party_id: "pA", email: "hq@demo" },
-    { id: "u-adminA", full_name: "Demo Party Admin (Alpha)", role: "party_admin", party_id: "pA", email: "admin@demo" },
-    { id: "u-adminB", full_name: "Demo Party Admin (Beta)", role: "party_admin", party_id: "pB", email: "adminb@demo" },
+    { id: "u-rep", full_name: "Polling agent · one station (Alpha)", role: "rep", party_id: "pA", station: "RNO-1", email: "rep@demo" },
+    { id: "u-cnt", full_name: "Neutral counter · one station", role: "counter", party_id: null, station: "RNO-2", email: "counter@demo" },
+    { id: "u-watch", full_name: "Constituency room · Roseau North (Alpha)", role: "watch", party_id: "pA", constituency: 15, email: "watch@demo" },
+    { id: "u-hq", full_name: "Party leader · all of Dominica (Alpha)", role: "hq", party_id: "pA", email: "hq@demo" },
+    { id: "u-adminA", full_name: "Party office · team & invites (Alpha)", role: "party_admin", party_id: "pA", email: "admin@demo" },
+    { id: "u-adminB", full_name: "Party office (Beta) · cannot see Alpha", role: "party_admin", party_id: "pB", email: "adminb@demo" },
     { id: "u-sys", full_name: "Demo System Admin", role: "sys_admin", party_id: null, email: "sys@demo" },
     { id: "u-media", full_name: "Demo News Desk (DBS Radio)", role: "media", party_id: null, email: "media@demo" },
   ];
@@ -50,10 +50,12 @@
   // station opening and closing (synthetic): most open on time, a few late
   stations.forEach((s) => { const z = sim[s.id]; z.openAt = OPEN - 3 + Math.random() * 12 + (Math.random() < 0.1 ? 20 + Math.random() * 25 : 0);
     z.closeAt = CLOSE + Math.random() * 20 + (Math.random() < 0.08 ? 25 : 0); z.officialAt = z.resultAt + 20 + Math.random() * 45; });
-  sim["RNO-1"].manualFor = "pA";
-  sim["RNO-2"].counter = false; sim["RNO-2"].manualCounter = true; // the demo counter persona works this station by hand
+  sim["RNO-2"].counter = true; // simulated until the demo counter persona starts tapping; then it is worked by hand
   sim["RNO-2"].coveredBy = ["pA", "pB"];
-  let meId = localStorage.getItem("vw_demo_persona") || "u-rep";
+  sim["RNO-1"].coveredBy = ["pA", "pB"]; // the demo polling agent's own station always has an Alpha agent reporting
+  // the demo restarts on every load, so forget the demo people's tap counters (never touches real accounts)
+  try { Object.keys(localStorage).filter((k) => /^vw_tally_[a-z]+_u-/.test(k)).forEach((k) => localStorage.removeItem(k)); } catch (e) {}
+  let meId = localStorage.getItem("vw_demo_persona2") || "u-hq"; if (!people.some((x) => x.id === meId && !["sys_admin", "media"].includes(x.role))) meId = "u-hq";
   const DB = { events: [], subs: [], recon: [], est: [], inc: [], notes: [], ratings: [], invites: [], audit: [], imports: [], keys: new Set(), counts: [], results: [], targets: new Map(), cands: [] };
   // synthetic expected supporters per station (some optimistic, some cautious, so weak areas appear)
   ["pA", "pB"].forEach((p) => stations.forEach((s) => { if (rnd() < 0.92) DB.targets.set(p + "|" + s.id, Math.round(s.electors_listed * 0.66 * shareOf(p, s.constituency_id) * (0.85 + rnd() * 0.45))); }));
@@ -69,8 +71,8 @@
     const r = l > 0.62 ? "stronghold" : l > 0.52 ? "leaning" : l > 0.45 ? "competitive" : l > 0.36 ? "opponent_leaning" : "opponent_stronghold";
     DB.ratings.push({ party_id: p, constituency_id: c.id, rating: r, note: null });
   }));
-  DB.notes.push({ id: 1, party_id: "pA", body: "All Roseau reps confirmed and briefed.", created_at: T(OPEN - 40), profiles: { full_name: "Demo Head Office (Alpha)" } });
-  DB.notes.push({ id: 2, party_id: "pB", body: "Beta-only note: transport for the south-east is ready.", created_at: T(OPEN - 30), profiles: { full_name: "Demo Party Admin (Beta)" } });
+  DB.notes.push({ id: 1, party_id: "pA", body: "All Roseau reps confirmed and briefed.", created_at: T(OPEN - 40), profiles: { full_name: "Party leader (Alpha)" } });
+  DB.notes.push({ id: 2, party_id: "pB", body: "Beta-only note: transport for the south-east is ready.", created_at: T(OPEN - 30), profiles: { full_name: "Party office (Beta)" } });
   let nextId = 1;
   const me = () => people.find((p) => p.id === meId);
   const party = () => parties.find((p) => p.id === me().party_id);
@@ -190,8 +192,9 @@
           const prev = latestEff(p, s.id); if (prev) v = Math.max(v, prev.attendance);
           if (prev && Math.random() < 0.02) v = Math.round(prev.attendance * 0.6);
           const save = simMin; simMin = t;
-          const r = addSub(p, s.id, "sim", uid(), v);
-          DB.est.push({ id: nextId++, party_id: p, station_id: s.id, user_id: "sim", client_key: uid(), estimated_supporters: Math.round(trueVoted(s, t) * shareOf(p, s.constituency_id) * z.recog[p]),
+          const who = s.id === "RNO-1" && p === "pA" ? "u-rep" : "sim"; // the demo agent's own station shows as their own reports until they take over
+          const r = addSub(p, s.id, who, uid(), v);
+          DB.est.push({ id: nextId++, party_id: p, station_id: s.id, user_id: who, client_key: uid(), estimated_supporters: Math.round(trueVoted(s, t) * shareOf(p, s.constituency_id) * z.recog[p]),
             confidence: ["low", "medium", "high"][Math.floor(Math.random() * 3)], received_at: nowIso() });
           simMin = save;
           if (!r.flags?.length && Math.random() < 0.85) DB.recon.push({ submission_id: r.id, party_id: p, decision: "reconciled", by_user: "sim", at: T(t + 20 + Math.random() * 30), _due: t + 20 + Math.random() * 30 });
@@ -231,6 +234,7 @@
     acc += dt * speed; if (acc >= 1) { const m = Math.floor(acc); acc -= m; tick(m); listeners.forEach((f) => f("tick")); }
   }, 250);
   tick(0);
+  while (simMin < 11 * 60 + 30) tick(5); // open the demo mid-morning with every constituency already reporting
 
   const R = (v) => Promise.resolve(JSON.parse(JSON.stringify(v)));
   window.VW_API = {
@@ -238,7 +242,7 @@
     now: () => new Date(day.getTime() + simMin * 60000),
     demo: {
       people, get persona() { return meId; },
-      setPersona(id) { meId = id; localStorage.setItem("vw_demo_persona", id); listeners.forEach((f) => f("auth")); },
+      setPersona(id) { meId = id; localStorage.setItem("vw_demo_persona2", id); listeners.forEach((f) => f("auth")); },
       get playing() { return playing; }, toggle() { playing = !playing; return playing; },
       setSpeed(s) { speed = s; }, get speed() { return speed; },
       jump(m) { while (simMin < Math.min(m, END)) tick(5); listeners.forEach((f) => f("tick")); },
@@ -308,6 +312,7 @@
       DB.cands.push(c); audit("add_candidate", "candidate", c.id); return c.id; },
     async setCandidateActive(id, a) { if (me().role !== "sys_admin") deny(); const c = DB.cands.find((x) => x.id === id); if (c) c.active = a; },
     async submitCount(x) { const u = me(), src = u.role === "counter" && u.station === x.station ? "counter" : u.role === "sys_admin" ? "official" : deny("Only the neutral counter for this station (or a system administrator) can do this");
+      if (src === "counter") { sim[x.station].counter = false; sim[x.station].manualCounter = true; }
       const k = "cnt|" + x.key; if (DB.keys.has(k)) return R({ duplicate: true }); DB.keys.add(k);
       const c = addCount(x.station, u.id, x.voted, src, { key: x.key, note: x.note }); audit("submit_count", "station_count", c.id); return R({ duplicate: false, id: c.id, received_at: c.received_at, flags: c.flags }); },
     async correctCount(x) { const u = me(), o = DB.counts.find((c) => c.id === x.original); if (!o || o.user_id !== u.id) deny("You can only correct your own figures");
@@ -358,6 +363,7 @@
       return R({ subs: DB.subs.filter(mine).reverse().map(withStatus), estimates: DB.est.filter(mine).reverse(), incidents: DB.inc.filter(mine).reverse() });
     },
     async submitAttendance(x) { const u = me(); if (u.role !== "rep" || !canSeeStation(x.station)) deny("You are not assigned to this station");
+      sim[x.station].manualFor = u.party_id; // the simulation stops for this station once the person starts tapping
       const r = addSub(u.party_id, x.station, u.id, x.key, x.attendance, { note: x.note, device_time: x.device_time }); if (!r.duplicate) audit("submit_attendance", "submission", r.id); return R(r); },
     async submitCorrection(x) {
       const u = me(), o = DB.subs.find((s) => s.id === x.original);

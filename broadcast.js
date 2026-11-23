@@ -161,7 +161,7 @@
     $("#main").innerHTML = `<div class="row noprint" id="bcCtl" style="margin-bottom:10px">
         ${canSwitch ? `<div class="seg"><button data-m="turnout">🗳 Voting day</button><button data-m="results">📊 Count night</button></div><button class="btn sm ghost" data-m="auto">Automatic</button>` : ""}
         <button class="btn sm" id="bcFs">⛶ Full screen</button>
-        <span class="small muted">Full screen, then stream this window with OBS Studio or StreamYard to Facebook, YouTube or TikTok. Press Esc to leave full screen.</span></div>
+        <span class="small muted">${API.mode === "demo" ? "Press Esc to leave full screen." : "Full screen, then stream this window with OBS Studio or StreamYard to Facebook, YouTube or TikTok. Press Esc to leave full screen."}</span></div>
       <div id="bcWrap">${stageHTML(label)}</div>`;
     drawMapSVG(); S = { ...S, prev: {}, queue: [], showing: false, ticks: [], ready: false, drawn: null, feat: null };
     $$("#bcCtl [data-m]").forEach((b) => (b.onclick = () => { if (b.dataset.m === "auto") S.manual = false; else { S.manual = true; S.mode = b.dataset.m; } load(); }));
