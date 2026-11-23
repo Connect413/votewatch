@@ -26,7 +26,7 @@
     onChange(cb) {
       listeners.push(cb);
       const ch = sb.channel("vw-live");
-      ["submissions", "incidents", "support_estimates", "station_counts", "station_results"].forEach((t) =>
+      ["submissions", "incidents", "support_estimates", "station_counts", "station_results", "station_events"].forEach((t) =>
         ch.on("postgres_changes", { event: "*", schema: "public", table: t }, () => cb(t)));
       ch.subscribe();
       setInterval(() => cb("poll"), 15000); // national figures include other parties' shared data → poll
@@ -58,6 +58,15 @@
       if (cid) q = q.eq("polling_districts.constituency_id", cid);
       return ok(await q).map(stationShape);
     },
+    loadPracticeStations: () => rpc("load_practice_stations"),
+    appSettings: () => rpc("app_settings"),
+    setPollTimes: (open, close) => rpc("set_poll_times", { p_open: open, p_close: close }),
+    createMediaInvite: (outlet, live) => rpc("create_media_invite", { p_outlet: outlet, p_live: live }),
+    setMediaLive: (user, live) => rpc("set_media_live", { p_user: user, p_live: live }),
+    async mediaOutlets() { return ok(await sb.from("media_access").select("*")); },
+    reportStationEvent: (x) => rpc("report_station_event", { p_station: x.station, p_kind: x.kind, p_at: x.at, p_client_key: x.key }),
+    stationTimes: (cid) => rpc("station_times", { p_constituency: cid ?? null }),
+    clearPracticeStations: () => rpc("clear_practice_stations"),
     nationalSummary: () => rpc("national_summary"),
     nationalStations: (cid) => rpc("national_stations", { p_constituency: cid }),
     nationalTimeline() { const d = new Date(); d.setHours(6, 0, 0, 0); return rpc("national_timeline", { p_from: d.toISOString() }); },

@@ -8,14 +8,14 @@
   const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "d-" + Math.random().toString(16).slice(2));
   const day = new Date(); day.setHours(0, 0, 0, 0);
   const OPEN = 7 * 60, CLOSE = 17 * 60;
-  const END = CLOSE + 240; // simulation runs to 21:00 so the evening count can be shown
+  const END = CLOSE + 330; // simulation runs to 22:30 so the evening count and declarations can be shown
   let simMin = OPEN, speed = 5, playing = true;
   const T = (m) => new Date(day.getTime() + m * 60000).toISOString();
   const nowIso = () => T(simMin);
 
   const parties = [
     { id: "pA", name: "Party Alpha (demo)", short_name: "ALP", color: "#6A3D9A", share_counts: true, share_incidents: true },
-    { id: "pB", name: "Party Beta (demo)", short_name: "BET", color: "#0F7C80", share_counts: true, share_incidents: false },
+    { id: "pB", name: "Party Beta (demo)", short_name: "BET", color: "#1E5FD6", share_counts: true, share_incidents: false },
   ];
   const constituencies = MAP.consts.map((c, i) => ({ id: i + 1, code: c.code, name: c.name }));
   const stations = [];
@@ -44,18 +44,23 @@
     { id: "u-adminA", full_name: "Demo Party Admin (Alpha)", role: "party_admin", party_id: "pA", email: "admin@demo" },
     { id: "u-adminB", full_name: "Demo Party Admin (Beta)", role: "party_admin", party_id: "pB", email: "adminb@demo" },
     { id: "u-sys", full_name: "Demo System Admin", role: "sys_admin", party_id: null, email: "sys@demo" },
+    { id: "u-media", full_name: "Demo News Desk (DBS Radio)", role: "media", party_id: null, email: "media@demo" },
   ];
+  const MEDIA = [{ user_id: "u-media", outlet: "DBS Radio (demo)", live: true }];
+  // station opening and closing (synthetic): most open on time, a few late
+  stations.forEach((s) => { const z = sim[s.id]; z.openAt = OPEN - 3 + Math.random() * 12 + (Math.random() < 0.1 ? 20 + Math.random() * 25 : 0);
+    z.closeAt = CLOSE + Math.random() * 20 + (Math.random() < 0.08 ? 25 : 0); z.officialAt = z.resultAt + 20 + Math.random() * 45; });
   sim["RNO-1"].manualFor = "pA";
   sim["RNO-2"].counter = false; sim["RNO-2"].manualCounter = true; // the demo counter persona works this station by hand
   sim["RNO-2"].coveredBy = ["pA", "pB"];
   let meId = localStorage.getItem("vw_demo_persona") || "u-rep";
-  const DB = { subs: [], recon: [], est: [], inc: [], notes: [], ratings: [], invites: [], audit: [], imports: [], keys: new Set(), counts: [], results: [], targets: new Map(), cands: [] };
+  const DB = { events: [], subs: [], recon: [], est: [], inc: [], notes: [], ratings: [], invites: [], audit: [], imports: [], keys: new Set(), counts: [], results: [], targets: new Map(), cands: [] };
   // synthetic expected supporters per station (some optimistic, some cautious, so weak areas appear)
   ["pA", "pB"].forEach((p) => stations.forEach((s) => { if (rnd() < 0.92) DB.targets.set(p + "|" + s.id, Math.round(s.electors_listed * 0.66 * shareOf(p, s.constituency_id) * (0.85 + rnd() * 0.45))); }));
   // synthetic candidates: one per party in every constituency, plus an independent in three
   constituencies.forEach((c) => {
     DB.cands.push({ id: "c" + c.id + "A", constituency_id: c.id, name: "Alpha candidate · " + c.code, party_id: "pA", label: null, color: "#6A3D9A", ballot_order: 1, active: true });
-    DB.cands.push({ id: "c" + c.id + "B", constituency_id: c.id, name: "Beta candidate · " + c.code, party_id: "pB", label: null, color: "#0F7C80", ballot_order: 2, active: true });
+    DB.cands.push({ id: "c" + c.id + "B", constituency_id: c.id, name: "Beta candidate · " + c.code, party_id: "pB", label: null, color: "#1E5FD6", ballot_order: 2, active: true });
     if (indep[c.id]) DB.cands.push({ id: "c" + c.id + "I", constituency_id: c.id, name: "Independent · " + c.code, party_id: null, label: "Independent", color: "#8C8C8C", ballot_order: 3, active: true });
   });
   const candAff = (c) => (c.party_id ? parties.find((p) => p.id === c.party_id)?.short_name : c.label || "Independent");
@@ -104,6 +109,8 @@
     if (u.role === "watch") return cOf(sid) === u.constituency; return u.station === sid; };
   const canSeeC = (cid) => { const u = me(); return u.role === "hq" || u.role === "party_admin" || (u.role === "watch" && u.constituency === cid); };
   const deny = (m) => { throw new Error(m || "Not permitted"); };
+  const canNat = () => { const u = me(); if (!u) return false; if (u.role === "hq" || u.role === "sys_admin") return true;
+    if (u.role === "media") { const m = MEDIA.find((x) => x.user_id === u.id); return !!m && u.active !== false && (m.live || simMin >= CLOSE); } return false; };
 
   const notSup = (arr, x) => !arr.some((y) => y.corrects_id === x.id);
   function neutral(sid) { let best = null; DB.counts.forEach((c) => { if (c.station_id !== sid || !notSup(DB.counts, c)) return;
@@ -204,6 +211,11 @@
         simMin = save;
       }
     });
+    stations.forEach((s) => { const z = sim[s.id];
+      if (!z.manualCounter && !z.openSent && z.openAt <= simMin) { z.openSent = true; DB.events.push({ station_id: s.id, kind: "opened", at: T(z.openAt), source: z.counter ? "counter" : "party", user_id: "sim" }); }
+      if (!z.manualCounter && !z.closeSent && z.closeAt <= simMin) { z.closeSent = true; DB.events.push({ station_id: s.id, kind: "closed", at: T(z.closeAt), source: z.counter ? "counter" : "party", user_id: "sim" }); }
+      if (z.resultSent && !z.officialSent && z.officialAt <= simMin) { const r = latestResult(s.id);
+        if (r) { z.officialSent = true; const save = simMin; simMin = Math.max(z.officialAt, CLOSE + 1); addResult(s.id, "sim-official", { ...r.votes }, r.rejected, "official"); simMin = save; } } });
     if (simMin <= CLOSE && Math.random() < dm * 0.01) {
       const s = stations[Math.floor(Math.random() * stations.length)], p = Math.random() < 0.5 ? "pA" : "pB";
       DB.inc.push({ id: nextId++, party_id: p, station_id: s.id, category: INC[Math.floor(Math.random() * INC.length)], severity: ["low", "medium", "high"][Math.floor(Math.random() * 3)],
@@ -244,6 +256,7 @@
     constituencies: () => R([...constituencies].sort((a, b) => a.name.localeCompare(b.name))),
     stations: (cid) => R(stations.filter((s) => !cid || s.constituency_id === cid)),
     nationalSummary() {
+      if (!canNat()) return R([]);
       const ns = stations.map(natStation);
       return R(constituencies.map((c) => {
         const xs = ns.filter((n) => n.constituency_id === c.id);
@@ -255,8 +268,9 @@
           shared_incidents: DB.inc.filter((i) => i.status === "open" && cOf(i.station_id) === c.id && parties.find((p) => p.id === i.party_id).share_incidents).length };
       }).sort((a, b) => a.name.localeCompare(b.name)));
     },
-    nationalStations: (cid) => R(stations.filter((s) => !cid || s.constituency_id === cid).map(natStation)),
+    nationalStations: (cid) => R(stations.filter((s) => (!cid || s.constituency_id === cid) && (canNat() || canSeeStation(s.id))).map(natStation)),
     nationalTimeline() {
+      if (!canNat()) return R([]);
       const sharing = new Set(parties.filter((p) => p.share_counts).map((p) => p.id));
       const ev = [];
       DB.counts.filter((c) => notSup(DB.counts, c)).forEach((c) => ev.push({ m: minOf(c.received_at), sid: c.station_id, k: c.source === "official" ? "off" : "cnt", v: c.voted }));
@@ -272,15 +286,18 @@
       return R(out);
     },
     nationalResults() {
+      if (!canNat()) return R([]);
       return R(constituencies.map((c) => {
         const xs = stations.filter((s) => s.constituency_id === c.id), lr = xs.map((s) => latestResult(s.id)).filter(Boolean);
         const cs = DB.cands.filter((x) => x.constituency_id === c.id && x.active).map((x) => ({ id: x.id, name: x.name, party: candAff(x), party_id: x.party_id, color: x.color, ballot_order: x.ballot_order,
           votes: lr.reduce((a, r) => a + (r.votes[x.id] || 0), 0) })).sort((a, b) => b.votes - a.votes || a.ballot_order - b.ballot_order);
         return { constituency_id: c.id, code: c.code, name: c.name, stations_total: xs.length, stations_counted: lr.length, ballots: lr.reduce((a, r) => a + r.total_ballots, 0),
-          rejected: lr.reduce((a, r) => a + r.rejected, 0), candidates: cs, last_at: lr.map((r) => r.received_at).sort().slice(-1)[0] || null, flagged: lr.filter((r) => r.flags.length).length };
+          rejected: lr.reduce((a, r) => a + r.rejected, 0), candidates: cs, last_at: lr.map((r) => r.received_at).sort().slice(-1)[0] || null, flagged: lr.filter((r) => r.flags.length).length,
+          stations_official: lr.filter((r) => r.source === "official").length };
       }).sort((a, b) => a.name.localeCompare(b.name)));
     },
     nationalStationResults(cid) {
+      if (!canNat()) return R([]);
       return R(stations.filter((s) => s.constituency_id === cid).map((s) => { const n = natStation(s), r = latestResult(s.id);
         return { station_id: s.id, official_code: s.official_code, station_name: s.name, electors_listed: s.electors_listed, voted: n.voted,
           source: r?.source ?? null, votes: r?.votes ?? null, rejected: r?.rejected ?? null, total_ballots: r?.total_ballots ?? null, received_at: r?.received_at ?? null, flags: r?.flags ?? null }; }));
@@ -373,9 +390,31 @@
       if ((x.role === "rep" || x.role === "counter") && !x.station) deny("This invite needs a polling station"); if (x.role === "watch" && !x.constituency) deny("A watch room invite needs a constituency");
       DB.invites.push({ code, party_id: u.role === "sys_admin" ? x.party || null : u.party_id, role: x.role, station_id: x.station || null, constituency_id: x.constituency || null, label: x.label, created_at: nowIso(), expires_at: T(simMin + 14 * 1440), used_by: null, revoked: false });
       audit("create_invite", "invite", code, { role: x.role }); return code; },
-    invites() { const u = me(); return R(DB.invites.filter((i) => (u.role === "party_admin" && i.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter"].includes(i.role))).slice().reverse()); },
+    invites() { const u = me(); return R(DB.invites.filter((i) => (u.role === "party_admin" && i.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter", "media"].includes(i.role))).slice().reverse()); },
+    appSettings() { const u = me(), m = MEDIA.find((x) => x.user_id === u?.id);
+      return R({ poll_open: T(OPEN), poll_close: T(CLOSE), polls_closed: simMin >= CLOSE, national: canNat(), media: m ? { outlet: m.outlet, live: m.live } : null }); },
+    async setPollTimes() { if (me().role !== "sys_admin") deny(); deny("In the demo the poll times are fixed at 7:00 am and 5:00 pm."); },
+    async createMediaInvite(outlet, live) { if (me().role !== "sys_admin") deny(); if (!String(outlet || "").trim()) deny("Type the media outlet's name");
+      const code = Math.random().toString(16).slice(2, 6).toUpperCase() + "-" + Math.random().toString(16).slice(2, 6).toUpperCase() + "-" + Math.random().toString(16).slice(2, 6).toUpperCase();
+      DB.invites.push({ code, party_id: null, role: "media", station_id: null, constituency_id: null, label: outlet.trim(), media_outlet: outlet.trim(), media_live: live !== false, created_at: nowIso(), expires_at: T(simMin + 14 * 1440), used_by: null, revoked: false });
+      audit("create_invite", "invite", code, { role: "media" }); return code; },
+    async setMediaLive(user, live) { if (me().role !== "sys_admin") deny(); const m = MEDIA.find((x) => x.user_id === user); if (!m) deny("Not a media outlet"); m.live = live; },
+    mediaOutlets() { return R(me().role === "sys_admin" ? MEDIA : MEDIA.filter((m) => m.user_id === meId)); },
+    async reportStationEvent(x) { const u = me(); if (!["rep", "counter"].includes(u.role) || !canSeeStation(x.station)) deny("Not your polling station");
+      if (new Date(x.at) > new Date(day.getTime() + (simMin + 5) * 60000)) deny("That time is in the future");
+      if (DB.keys.has(x.key)) return null; DB.keys.add(x.key);
+      DB.events.push({ station_id: x.station, kind: x.kind, at: x.at, source: u.role === "counter" ? "counter" : "party", user_id: u.id }); audit("station_" + x.kind, "station", x.station); return 1; },
+    stationTimes(cid) { const rank = { official: 1, counter: 2, party: 3 };
+      return R(stations.filter((s) => (!cid || s.constituency_id === cid) && (canNat() || canSeeStation(s.id))).map((s) => {
+        const pick = (k) => { const ev = DB.events.filter((e) => e.station_id === s.id && e.kind === k); if (!ev.length) return [null, null];
+          const best = Math.min(...ev.map((e) => rank[e.source])), xs = ev.filter((e) => rank[e.source] === best).map((e) => e.at).sort();
+          return [k === "opened" ? xs[0] : xs[xs.length - 1], ev.find((e) => rank[e.source] === best).source]; };
+        const [o, os] = pick("opened"), [c, cs] = pick("closed");
+        return { station_id: s.id, constituency_id: s.constituency_id, opened_at: o, opened_source: os, closed_at: c, closed_source: cs }; })); },
+    async loadPracticeStations() { if (me().role !== "sys_admin") deny(); return 0; },
+    async clearPracticeStations() { if (me().role !== "sys_admin") deny(); return 0; },
     async revokeInvite(code) { const i = DB.invites.find((x) => x.code === code); if (i) i.revoked = true; },
-    members() { const u = me(); return R(people.filter((p) => (u.role === "party_admin" && p.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter"].includes(p.role)))
+    members() { const u = me(); return R(people.filter((p) => (u.role === "party_admin" && p.party_id === u.party_id) || (u.role === "sys_admin" && ["party_admin", "sys_admin", "counter", "media"].includes(p.role)))
       .map((p) => ({ id: p.id, full_name: p.full_name, role: p.role, active: p.active !== false, party_id: p.party_id, assignments: [p.station ? { station_id: p.station } : null, p.constituency ? { constituency_id: p.constituency } : null].filter(Boolean) }))); },
     async setMemberActive(id, a) { if (id === meId) deny("You cannot deactivate yourself"); const p = people.find((x) => x.id === id); if (p) p.active = a; },
     audit() { const u = me(); return R(DB.audit.filter((a) => (u.role === "party_admin" && a.party_id === u.party_id) || (u.role === "sys_admin" && !a.party_id)).slice(-200).reverse()); },

@@ -18,7 +18,7 @@ const tallySendKey = (kind, sid, T) => { if (T.keyFor !== T.n || !T.key) { T.key
 function toast(msg, err) { const t = $("#toast"); t.textContent = msg; t.classList.toggle("err", !!err); t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), err ? 5000 : 3000); }
 async function guard(fn, okMsg) { try { const r = await fn(); if (okMsg) toast(okMsg); return r; } catch (e) { toast(e.message || String(e), true); return undefined; } }
 
-const ROLE = { rep: "Station representative", watch: "Watch room", hq: "Head office", party_admin: "Party administrator", sys_admin: "System administrator", counter: "Neutral station counter" };
+const ROLE = { rep: "Station representative", watch: "Watch room", hq: "Party leader", party_admin: "Party administrator", sys_admin: "System administrator", counter: "Neutral station counter", media: "News media" };
 const RATINGS = [
   ["stronghold", "Our stronghold", 1], ["leaning", "Leaning our way", 0.6], ["competitive", "Competitive", 0],
   ["opponent_leaning", "Leaning to opponents", -0.6], ["opponent_stronghold", "Opponents' stronghold", -1], ["unrated", "Not rated", null],
@@ -29,14 +29,28 @@ const PARTY_PRESETS = [
   ["United Workers' Party", "UWP", "#1F4E9E", "blue"],
   ["Dominica Freedom Party", "DFP", "#1B7F3B", "green"],
   ["United Progressive Party", "UPP", "#E8740C", "orange"],
+  ["Independent – (type the candidate's name)", "IND", "#8C8C8C", "independent candidate: their own private workspace"],
 ];
 const JOBS = { inside: { short: "inside: live count", long: "INSIDE the station: tap +1 for every person who votes" },
   outside: { short: "outside: our supporters", long: "OUTSIDE the station: tap +1 for every supporter of ours you recognise going in" },
   both: { short: "inside + outside", long: "live count of all voters AND our supporters" } };
+// One clear "send it" panel for every invite: WhatsApp, text message or copy, and what happens next
+function inviteSent(el, { code, msg, who }) {
+  const enc = encodeURIComponent(msg);
+  el.innerHTML = `<div class="sendbox" data-code="${esc(code)}"><div><b>✅ Invite ready for ${esc(who)}.</b> Now send it to them:</div>
+    <div class="sendrow"><a class="btn wa" href="https://wa.me/?text=${enc}" target="_blank" rel="noopener">📲 Send by WhatsApp</a>
+      <a class="btn ghost" href="sms:?&body=${enc}">💬 Send by text</a><button class="btn ghost" type="button" data-copy>📋 Copy</button></div>
+    <ol class="small steps"><li>They tap the link on their phone.</li><li>They type their name, email and a password.</li><li>That's it: they're in, already set to the right place.</li></ol>
+    <p class="small muted" style="margin:0">The invite works once, for 14 days (code ${esc(code)}). Sent it to the wrong person, or made a mistake? Press <b>Cancel invite</b> in the list and make a new one.</p></div>`;
+  el.querySelector("[data-copy]").onclick = () => (navigator.clipboard ? navigator.clipboard.writeText(msg) : Promise.reject()).then(() => toast("Copied. Paste it into WhatsApp or a text message."), () => toast("Could not copy here. Use the WhatsApp button instead.", true));
+  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+const inviteMsg = (name, what, link) => `${name ? "Hello " + name + ", y" : "Y"}ou are invited to Vote Watch Dominica as ${what}.\n\nTap this link to join:\n${link}\n\nThis link is for you only. Please don't forward it.`;
+const noStations = (sys) => `<option value="">No polling stations yet${sys ? " (load practice stations on the System admin tab)" : " (the system administrator loads them)"}</option>`;
 // the job travels in the invite link and is remembered on the rep's phone; it only decides which screen opens first
 (() => { const j = (location.hash.match(/job=(inside|outside|both)/) || [])[1]; if (j) localStorage.setItem("vw_job", j); })();
 const INCIDENT_CATS = ["Station opened late", "Long queue / delays", "Representative refused entry", "Power or lighting problem", "Access problem for elderly or disabled voters", "Crowd or security concern", "Count does not match station records", "Other"];
-let ME = null, CONSTS = [], VIEW = null, REFRESH = null, SEL = { c: null, natC: null, hqMode: "rating", natMode: "obs", repTab: "turnout", repStation: null };
+let SETTINGS = null, ME = null, CONSTS = [], VIEW = null, REFRESH = null, SEL = { c: null, natC: null, hqMode: "rating", natMode: "obs", repTab: "turnout", repStation: null };
 const cName = (id) => (CONSTS.find((c) => c.id === id) || {}).name || "—";
 const cByCode = (code) => CONSTS.find((c) => c.code === code);
 
@@ -46,7 +60,7 @@ const OB_KEY = () => "vw_outbox_" + (ME?.id || "x");
 const outbox = { get: () => { try { return JSON.parse(localStorage.getItem(OB_KEY()) || "[]"); } catch { return []; } }, set: (v) => localStorage.setItem(OB_KEY(), JSON.stringify(v)) };
 const isNetErr = (e) => !online() || /failed to fetch|networkerror|load failed|network request failed|fetch/i.test(e?.message || "");
 const SENDERS = { attendance: (x) => API.submitAttendance(x), correction: (x) => API.submitCorrection(x), estimate: (x) => API.submitEstimate(x), incident: (x) => API.reportIncident(x),
-  count: (x) => API.submitCount(x), countCorrection: (x) => API.correctCount(x), results: (x) => API.submitResults(x) };
+  count: (x) => API.submitCount(x), countCorrection: (x) => API.correctCount(x), results: (x) => API.submitResults(x), event: (x) => API.reportStationEvent(x) };
 async function send(kind, payload) {
   const item = { kind, payload: { ...payload, device_time: payload.device_time || API.now().toISOString() }, queued_at: new Date().toISOString() };
   if (!online()) { queue(item); return { queued: true }; }
@@ -143,12 +157,14 @@ const stationPill = (at) => (!at ? '<span class="pill p-none">NOT REPORTED</span
 
 // ------------------------------------------------------------------ shell
 function tabsFor(role) {
-  const nat = ["national", "ALL", "National Watch"];
-  return { rep: [["station", "L1", "My station"], nat], watch: [["watch", "L2", "Watch room"], nat],
-    hq: [["hq", "L3", "Head office"], ["watch", "L2", "Watch rooms"], nat],
-    party_admin: [["hq", "L3", "Head office"], ["watch", "L2", "Watch rooms"], nat, ["team", "ADM", "Team & sharing"]],
-    counter: [["counter", "L1", "My station count"], nat],
-    sys_admin: [["admin", "SYS", "System admin"], ["count", "CNT", "Counters & results"], nat] }[role] || [];
+  // The National Watch (all of Dominica) is only for party leaders, system administrators and media outlets that are switched on.
+  const nat = ["national", "ALL", "National Watch"], bc = ["broadcast", "LIVE", "Broadcast screen"];
+  return { rep: [["station", "L1", "My station"]], watch: [["watch", "L2", "My constituency"]],
+    hq: [["hq", "L3", "Our party"], ["watch", "L2", "Constituencies"], nat, bc],
+    party_admin: [["hq", "L3", "Our party"], ["watch", "L2", "Constituencies"], ["team", "ADM", "Team & sharing"]],
+    counter: [["counter", "L1", "My station count"]],
+    media: [bc, nat],
+    sys_admin: [["admin", "SYS", "System admin"], ["count", "CNT", "Counters & results"], ["media", "TV", "Media & poll times"], nat, bc] }[role] || [];
 }
 function paintShell() {
   const party = ME?.party;
@@ -210,8 +226,8 @@ function authScreen(mode) {
   if (inviteFromLink && !mode) mode = "signup";
   const M = $("#main");
   if (mode === "signup") {
-    M.innerHTML = `<div class="auth"><div class="card"><h2>Create your account</h2><p class="muted small">You need an invite code from your party administrator.</p>
-      <label class="f">Invite code</label><input class="inp" id="code" value="${esc(inviteFromLink)}" placeholder="XXXX-XXXX-XXXX" autocapitalize="characters">
+    M.innerHTML = `<div class="auth"><div class="card">${inviteFromLink ? `<h2>Welcome! You've been invited</h2><p class="small">Just fill in these three boxes and you're in. Your invite <b>${esc(inviteFromLink)}</b> is already filled in.</p>` : `<h2>Create your account</h2><p class="muted small">You need an invite link or code from your party administrator.</p>`}
+      <div class="${inviteFromLink ? "hide" : ""}"><label class="f">Invite code</label><input class="inp" id="code" value="${esc(inviteFromLink)}" placeholder="XXXX-XXXX-XXXX" autocapitalize="characters"></div>
       <label class="f">Your full name</label><input class="inp" id="name" autocomplete="name">
       <label class="f">Email</label><input class="inp" id="email" type="email" autocomplete="email">
       <label class="f">Password (at least 10 characters)</label><input class="inp" id="pw" type="password" autocomplete="new-password">
@@ -269,6 +285,7 @@ const leaderOf = (r) => { const cs = r.candidates || []; const tot = cs.reduce((
   return { c: cs[0], second: cs[1], tot, margin: (cs[0].votes - (cs[1]?.votes || 0)) / tot }; };
 const resultFill = (r) => { const L = leaderOf(r); if (!L) return "#E5E7E4"; if (L.second && L.c.votes === L.second.votes) return "#C9C9C9"; return hexMix(L.c.color, 0.35 + 0.65 * Math.min(1, L.margin / 0.3)); };
 async function viewNational() {
+  if (SETTINGS && !SETTINGS.national) { $("#main").innerHTML = `<div class="card"><h3>National Watch</h3><p>${SETTINGS.media && !SETTINGS.media.live ? `Your package opens the national picture when the polls close${SETTINGS.poll_close ? " at " + hhmm(SETTINGS.poll_close) : ""}.` : "The National Watch is for party leaders and the system administrator."}</p></div>`; return; }
   if (!SEL.natView) SEL.natView = "turnout";
   $("#main").innerHTML = `
   <div class="row" style="margin-bottom:10px"><b style="font-size:16px">National Watch</b><span class="muted small">One shared picture, identical for every party. Turnout comes from the official poll book or a neutral counter where there is one, otherwise from the party agents inside the station. Party supporter numbers are never shown here.</span></div>
@@ -309,11 +326,12 @@ async function natTurnout() {
     ...rows.map((r) => [r.name, r.voted, r.electors_listed, r.electors_listed ? ((r.voted / r.electors_listed) * 100).toFixed(1) : "", r.stations_reporting, r.stations_total, r.from_counter, r.from_party, r.over_list, r.disagreements, r.shared_incidents, r.last_at, API.now().toISOString()])]);
   async function drill() {
     const el = $("#natDrill"); if (!SEL.natC) return el.classList.add("hide");
-    const st = await API.nationalStations(SEL.natC); el.classList.remove("hide");
-    el.innerHTML = `<h3>${esc(cName(SEL.natC))} · stations <span class="sp"><button class="btn sm ghost" id="dClose">Close</button></span></h3><div class="tw" style="max-height:320px"><table><thead><tr><th>Station</th><th class="r">Voted</th><th class="r">Registered</th><th class="r">%</th><th>Figure from</th><th>Party agents' own counts</th><th class="r">Updated</th></tr></thead><tbody>${
+    const [st, tms] = await Promise.all([API.nationalStations(SEL.natC), API.stationTimes(SEL.natC).catch(() => [])]); el.classList.remove("hide");
+    const tm = (id) => tms.find((t) => t.station_id === id) || {};
+    el.innerHTML = `<h3>${esc(cName(SEL.natC))} · stations <span class="sp"><button class="btn sm ghost" id="dClose">Close</button></span></h3><div class="tw" style="max-height:320px"><table><thead><tr><th>Station</th><th class="r">Voted</th><th class="r">Registered</th><th class="r">%</th><th>Figure from</th><th>Party agents' own counts</th><th class="r">Opened</th><th class="r">Closed</th><th class="r">Updated</th></tr></thead><tbody>${
       st.map((s) => `<tr><td><b>${esc(s.official_code)}</b> <span class="muted small">${esc(s.station_name)}</span>${s.over_list ? ' <span class="pill p-flag">ABOVE REGISTER</span>' : ""}${s.disagreement ? ' <span class="pill p-flag">FIGURES DISAGREE</span>' : ""}</td>
         <td class="r num"><b>${fmt(s.voted)}</b></td><td class="r num">${fmt(s.electors_listed)}</td><td class="r num">${pct(s.voted, s.electors_listed)}</td><td>${s.voted === null ? stationPill(null) : srcPill(s.source)}</td>
-        <td class="small">${(s.party_figures || []).map((f) => `<span class="lg"><i style="background:${esc(f.color)}"></i>${esc(f.party)} ${fmt(f.attendance)}</span>`).join(" ") || '<span class="muted">—</span>'}</td><td class="r num">${hhmm(s.last_at)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No stations loaded for this constituency yet.</td></tr>'}</tbody></table></div>
+        <td class="small">${(s.party_figures || []).map((f) => `<span class="lg"><i style="background:${esc(f.color)}"></i>${esc(f.party)} ${fmt(f.attendance)}</span>`).join(" ") || '<span class="muted">—</span>'}</td><td class="r num">${hhmm(tm(s.station_id).opened_at)}</td><td class="r num">${hhmm(tm(s.station_id).closed_at)}</td><td class="r num">${hhmm(s.last_at)}</td></tr>`).join("") || '<tr><td colspan="9" class="muted">No stations loaded for this constituency yet.</td></tr>'}</tbody></table></div>
       <p class="small muted" style="margin-bottom:0">"Voted" is one figure per station: the official poll book if entered, otherwise the neutral counter, otherwise (backup) the highest count from party agents who share. Each party's own count is listed beside it so any difference is visible.</p>`;
     $("#dClose").onclick = () => { SEL.natC = null; el.classList.add("hide"); paint(); };
   }
@@ -415,10 +433,11 @@ async function viewStation() {
   $("#main").innerHTML = `<div class="rep">
     ${sts.length > 1 ? `<select class="inp" id="stSel" style="margin-bottom:10px">${sts.map((s) => `<option value="${s.id}" ${s.id === st.id ? "selected" : ""}>${esc(s.official_code)} — ${esc(s.name)}</option>`).join("")}</select>` : ""}
     <div class="receipt"><div class="h"><span>${esc(st.official_code)}</span><span class="pill p-ok">ASSIGNED</span></div><div>${esc(st.name)}</div><div class="muted small">${esc(st.district || "")} · ${esc(cName(st.constituency_id))}${st.electors_listed ? ` · ${fmt(st.electors_listed)} electors on list` : ""}</div></div>
-    <div id="outbox"></div>
+    <div id="ocBox"></div><div id="outbox"></div>
     <div class="rtabs">${job === "outside" ? "" : '<button data-t="turnout">Live count</button>'}<button data-t="support" class="priv">🔒 Our supporters</button>${job === "outside" ? '<button data-t="turnout">Live count</button>' : ""}${job === "outside" ? "" : '<button data-t="results">Count after close</button>'}<button data-t="incident">Incident</button><button data-t="history">My reports</button></div>
     <div id="repBody"></div></div>`;
   $("#stSel") && ($("#stSel").onchange = (e) => { SEL.repStation = e.target.value; viewStation(); });
+  openClose($("#ocBox"), st);
   $$(".rtabs button").forEach((b) => (b.onclick = () => { SEL.repTab = b.dataset.t; tab(); }));
   let mine = { subs: [], estimates: [], incidents: [] };
   const lastGood = () => mine.subs.find((s) => s.status !== "superseded" && s.status !== "rejected");
@@ -570,10 +589,11 @@ async function viewCounter() {
   $("#main").innerHTML = `<div class="rep">
     <div class="receipt"><div class="h"><span>${esc(st.official_code)}</span><span class="pill p-ok">NEUTRAL COUNTER</span></div><div>${esc(st.name)}</div><div class="muted small">${esc(st.district || "")} · ${esc(cName(st.constituency_id))}${st.electors_listed ? ` · ${fmt(st.electors_listed)} registered` : ""}</div>
       <div class="small" style="margin-top:4px">You belong to no party. Your figure is the one every party sees on the National Watch.</div></div>
-    <div id="outbox"></div>
+    <div id="ocBox"></div><div id="outbox"></div>
     <div class="rtabs"><button data-t="count">Voters in</button><button data-t="results">Count after close</button><button data-t="history">My entries</button></div>
     <div id="cBody"></div></div>`;
   $$(".rtabs button").forEach((b) => (b.onclick = () => { SEL.cntTab = b.dataset.t; tab(); }));
+  openClose($("#ocBox"), st);
   let mine = { counts: [], results: [] }, autoT = null;
   const lastCount = () => mine.counts.find((c) => !c.superseded);
   const lastRes = () => mine.results.find((r) => !r.superseded);
@@ -774,8 +794,8 @@ async function viewTeam() {
   <div class="grid two">
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Invite someone</h3>
-        <p class="small muted" style="margin-top:0">Create one invite per person. They open the link, make a password, and are linked to ${esc(P.short_name)} with exactly this role.</p>
-        <label class="f">Role</label><select class="inp" id="iRole"><option value="rep">Station representative (one polling station)</option><option value="watch">Watch room (one constituency)</option><option value="hq">Head office (sees everything for ${esc(P.short_name)})</option><option value="party_admin">Party administrator</option></select>
+        <p class="small" style="margin-top:0"><b>1.</b> Choose what they do and where. <b>2.</b> Press Create invite. <b>3.</b> Send it by WhatsApp. They tap the link, make a password, and they're in. One invite per person.</p>
+        <label class="f">Role</label><select class="inp" id="iRole"><option value="rep">Station representative (one polling station)</option><option value="watch">Constituency head / watch room (one constituency)</option><option value="hq">Party leader (everything for ${esc(P.short_name)} + the National Watch)</option><option value="party_admin">Party administrator (invites the team; no National Watch)</option></select>
         <div id="iWhere"><label class="f">Constituency</label><select class="inp" id="iC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
           <div id="iStWrap"><label class="f">Polling station</label><select class="inp" id="iS"></select></div></div>
         <div id="iJobWrap"><label class="f">Their job at the station</label><select class="inp" id="iJob"><option value="inside">Inside the station: live count of everyone voting (+1 each voter)</option><option value="outside">Outside the station: our supporters they recognise (+1 each supporter)</option><option value="both">Both jobs (one person)</option></select></div>
@@ -793,17 +813,17 @@ async function viewTeam() {
       <div class="card"><h3>Audit log (${esc(P.short_name)})</h3><div class="feed" id="audit"></div></div>
     </div></div>`;
   let stations = [];
-  const fillSt = async () => { stations = await API.stations(+$("#iC").value); $("#iS").innerHTML = stations.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || "<option value=''>No stations loaded yet</option>"; };
+  const fillSt = async () => { stations = await API.stations(+$("#iC").value); $("#iS").innerHTML = stations.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || noStations(false); };
   const where = () => { const r = $("#iRole").value; $("#iWhere").classList.toggle("hide", !["rep", "watch"].includes(r)); $("#iStWrap").classList.toggle("hide", r !== "rep"); $("#iJobWrap").classList.toggle("hide", r !== "rep"); };
   $("#iRole").onchange = where; $("#iC").onchange = fillSt; where(); fillSt();
   $("#iGo").onclick = () => guard(async () => {
     const role = $("#iRole").value, name = $("#iLabel").value.trim(), job = role === "rep" ? $("#iJob").value : null;
+    if (role === "rep" && !$("#iS").value) throw new Error("There are no polling stations to choose from yet.");
     const label = job ? `${name || "Rep"} (${JOBS[job].short})` : name;
     const code = await API.createInvite({ role, station: role === "rep" ? $("#iS").value || null : null, constituency: role === "watch" ? +$("#iC").value : null, label });
     const link = `${location.origin}${location.pathname}#invite=${code}${job ? "&job=" + job : ""}`;
-    const msg = `${name ? name + ", y" : "Y"}ou are invited to Vote Watch Dominica for ${P.name} as ${ROLE[role]}${job ? ` — ${JOBS[job].long}` : ""}.\nOpen: ${link}\nInvite code: ${code}\nThis code is for you only. Do not share it.`;
-    $("#iOut").innerHTML = `<div class="codebox">${esc(code)}</div><textarea class="inp" rows="5" style="margin-top:8px" readonly>${esc(msg)}</textarea><button class="btn sm ghost" id="copy" style="margin-top:6px">Copy message to send by WhatsApp/SMS</button>`;
-    $("#copy").onclick = () => navigator.clipboard.writeText(msg).then(() => toast("Copied."));
+    const what = `${ROLE[role]} for ${P.name}${role === "rep" ? " at " + ($("#iS").selectedOptions[0]?.textContent || "") : role === "watch" ? " (" + cName(+$("#iC").value) + ")" : ""}${job ? ` — ${JOBS[job].long}` : ""}`;
+    inviteSent($("#iOut"), { code, msg: inviteMsg(name, what, link), who: name || ROLE[role] });
     $("#iLabel").value = ""; loadLists();
   });
   const saveShare = () => guard(async () => { await API.setSharing($("#shC").checked, $("#shI").checked); ME.party.share_counts = $("#shC").checked; ME.party.share_incidents = $("#shI").checked; }, "Sharing updated.");
@@ -813,8 +833,8 @@ async function viewTeam() {
   async function loadLists() {
     const [inv, mem, aud] = await Promise.all([API.invites(), API.members(), API.audit()]);
     $("#invRows").innerHTML = inv.map((i) => { const st = i.used_by ? '<span class="pill p-ok">USED</span>' : i.revoked ? '<span class="pill p-none">REVOKED</span>' : new Date(i.expires_at) < new Date() ? '<span class="pill p-none">EXPIRED</span>' : '<span class="pill p-unv">OPEN</span>';
-      return `<tr><td class="num"><code>${esc(i.code)}</code></td><td>${esc(i.label || "")}</td><td class="small">${ROLE[i.role]}${i.station_id ? " · " + esc(stName(i.station_id)) : i.constituency_id ? " · " + esc(cName(i.constituency_id)) : ""}</td><td>${st}</td><td>${!i.used_by && !i.revoked ? `<button class="btn sm warn" data-rev="${esc(i.code)}">Revoke</button>` : ""}</td></tr>`; }).join("") || '<tr><td colspan="5" class="muted">No invites yet.</td></tr>';
-    $$("[data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadLists(); }, "Invite revoked.")));
+      return `<tr><td class="num"><code>${esc(i.code)}</code></td><td>${esc(i.label || "")}</td><td class="small">${ROLE[i.role]}${i.station_id ? " · " + esc(stName(i.station_id)) : i.constituency_id ? " · " + esc(cName(i.constituency_id)) : ""}</td><td>${st}</td><td>${!i.used_by && !i.revoked ? `<button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button>` : ""}</td></tr>`; }).join("") || '<tr><td colspan="5" class="muted">No invites yet.</td></tr>';
+    $$("[data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadLists(); }, "Invite cancelled. The link no longer works.")));
     $("#memRows").innerHTML = mem.map((m) => `<tr><td><b>${esc(m.full_name)}</b>${m.id === ME.id ? ' <span class="pill p-q">YOU</span>' : ""}</td><td class="small">${ROLE[m.role]}</td><td class="small">${esc(asg(m.assignments || []))}</td>
       <td>${m.id === ME.id ? "" : `<button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button>`}</td></tr>`).join("");
     $$("[data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this person's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); loadLists(); }, "Access updated."); }));
@@ -832,10 +852,14 @@ async function viewAdmin() {
         <label class="f">Quick fill (colours researched Nov 2026 — confirm with each party)</label>
         <select class="inp" id="pPreset"><option value="">Choose a party, or type your own below…</option>${PARTY_PRESETS.map((p, i) => `<option value="${i}">${esc(p[0])} (${esc(p[1])}) — ${esc(p[3])}</option>`).join("")}</select>
         <div class="grid" style="grid-template-columns:2fr 1fr auto auto;gap:6px;margin-top:10px;align-items:end"><div><label class="f">Full name</label><input class="inp" id="pName"></div><div><label class="f">Short name</label><input class="inp" id="pShort" maxlength="10"></div><div><label class="f">Colour</label><input type="color" id="pColor" value="#1565C0" style="height:38px;width:50px;border:0"></div><button class="btn" id="pGo">Add</button></div></div>
-      <div class="card"><h3>Invite a party administrator</h3><div class="row"><select class="inp" id="aParty" style="flex:1"></select><input class="inp" id="aLabel" placeholder="Person's name" style="flex:1"><button class="btn" id="aGo">Create invite</button></div>
-        <p class="small muted">Each party's administrator then invites their own head office, watch rooms and representatives.</p>
+      <div class="card"><h3>Invite a party administrator</h3>
+        <p class="small" style="margin-top:0">You invite <b>one administrator per party</b>. They then invite their own people (head office, watch rooms, station reps) from their own screen. You never see their team.</p>
+        <label class="f">Party</label><select class="inp" id="aParty"></select><label class="f">Person's name (optional)</label><input class="inp" id="aLabel" placeholder="e.g. John" maxlength="80">
+        <button class="btn" style="margin-top:10px" id="aGo">Create invite</button>
         <button class="btn sm ghost" id="sysInv">Invite a second system administrator (needed to approve station imports)</button><div id="aOut" style="margin-top:10px"></div></div>
-      <div class="card"><h3>Invites &amp; administrators</h3><div class="tw" style="max-height:260px"><table><tbody id="admInv"></tbody></table></div></div>
+      <div class="card"><h3>Invites &amp; administrators</h3><p class="small muted" style="margin-top:0">Made a mistake? <b>Cancel invite</b> stops a link that hasn't been used. <b>Remove access</b> locks out someone who already joined.</p><div class="tw" style="max-height:320px"><table><tbody id="admInv"></tbody></table></div></div>
+      <div class="card"><h3>Practice stations</h3><p class="small" style="margin-top:0">Until the Electoral Office's official list is loaded there are no polling stations, so nobody can be invited to a station. Load <b>practice stations</b> (2 per constituency, named "Practice station … (not real)") to try everything and rehearse. Remove them before the real list goes in.</p>
+        <div class="row"><button class="btn" id="prLoad">Load practice stations</button><button class="btn ghost warn" id="prClear">Remove practice stations</button></div></div>
     </div>
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Official polling station list</h3>
@@ -845,11 +869,14 @@ async function viewAdmin() {
       <div class="card"><h3>Stations loaded per constituency</h3><div class="tw" style="max-height:330px"><table><thead><tr><th>Constituency</th><th class="r">Stations</th><th class="r">Electors listed</th></tr></thead><tbody id="stCounts"></tbody></table></div></div>
       <div class="card"><h3>System audit log</h3><div class="feed" id="sAudit"></div></div>
     </div></div>`;
-  const invOut = (code, who) => { const link = `${location.origin}${location.pathname}#invite=${code}`; $("#aOut").innerHTML = `<div class="codebox">${esc(code)}</div><p class="small">Send to ${esc(who)}: <code>${esc(link)}</code></p>`; };
+  const invOut = (code, who, what) => { const link = `${location.origin}${location.pathname}#invite=${code}`; inviteSent($("#aOut"), { code, msg: inviteMsg(who, what, link), who: who || "them" }); };
   $("#pPreset").onchange = (e) => { const p = PARTY_PRESETS[e.target.value]; if (!p) return; $("#pName").value = p[0]; $("#pShort").value = p[1]; $("#pColor").value = p[2]; };
   $("#pGo").onclick = () => guard(async () => { const n = $("#pName").value.trim(), s = $("#pShort").value.trim(); if (!n || !s) throw new Error("Name and short name are required."); await API.createParty(n, s, $("#pColor").value); $("#pName").value = $("#pShort").value = ""; load(); }, "Party added.");
-  $("#aGo").onclick = () => guard(async () => { const code = await API.createInvite({ role: "party_admin", party: $("#aParty").value, label: $("#aLabel").value.trim() }); invOut(code, $("#aLabel").value || "the party administrator"); load(); });
-  $("#sysInv").onclick = () => guard(async () => { const code = await API.createInvite({ role: "sys_admin", label: "System administrator" }); invOut(code, "the second system administrator"); load(); });
+  $("#aGo").onclick = () => guard(async () => { if (!$("#aParty").value) throw new Error("Add the party first (box above)."); const who = $("#aLabel").value.trim(), pn = $("#aParty").selectedOptions[0].textContent;
+    const code = await API.createInvite({ role: "party_admin", party: $("#aParty").value, label: who }); invOut(code, who ? `${who} (${pn})` : pn, `the Party administrator for ${pn}`); $("#aLabel").value = ""; load(); });
+  $("#sysInv").onclick = () => guard(async () => { const code = await API.createInvite({ role: "sys_admin", label: "System administrator" }); invOut(code, "", "a System administrator"); load(); });
+  $("#prLoad").onclick = () => guard(async () => { const n = await API.loadPracticeStations(); load(); toast(`${n} practice stations ready (2 per constituency, marked "not real").`); });
+  $("#prClear").onclick = () => confirm("Remove all practice stations? Invites to them are cancelled and people assigned to them lose that station. Accounts stay.") && guard(async () => { await API.clearPracticeStations(); load(); }, "Practice stations removed.");
   $("#tmpl").onclick = () => csv("polling-stations-template.csv", [["constituency", "polling_district", "district_code", "station_code", "station_name", "electors_listed"], ["Roseau North", "Example district", "", "EXAMPLE-01", "Example station name", "500"]]);
   $("#csvFile").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return; const rows = parseCSV(await f.text());
@@ -861,9 +888,15 @@ async function viewAdmin() {
   async function load() {
     const [ps, inv, bs, st, mem, aud] = await Promise.all([API.parties(), API.invites(), API.imports(), API.stations(), API.members(), API.audit()]);
     $("#parties").innerHTML = ps.map((p) => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)"><span style="width:14px;height:14px;border-radius:50%;background:${esc(p.color)}"></span><b>${esc(p.name)}</b><span class="muted">${esc(p.short_name)}</span><span class="small muted" style="margin-left:auto">${p.share_counts ? "shares turnout" : "turnout private"}</span></div>`).join("") || '<p class="muted small">No parties yet.</p>';
-    $("#aParty").innerHTML = ps.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
-    $("#admInv").innerHTML = mem.map((m) => `<tr><td><b>${esc(m.full_name)}</b></td><td class="small">${ROLE[m.role]} ${m.party_id ? "· " + esc((ps.find((p) => p.id === m.party_id) || {}).short_name || "") : ""}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td></tr>`).join("") +
-      inv.filter((i) => !i.used_by && !i.revoked).map((i) => `<tr><td><code>${esc(i.code)}</code> ${esc(i.label || "")}</td><td class="small">${ROLE[i.role]} invite</td><td><span class="pill p-unv">OPEN</span></td></tr>`).join("");
+    const keepP = $("#aParty").value; // never reset the person's choice while the list refreshes
+    $("#aParty").innerHTML = ps.map((p) => `<option value="${p.id}" ${p.id === keepP ? "selected" : ""}>${esc(p.name)}</option>`).join("") || '<option value="">Add a party first (box above)</option>';
+    const pShort = (id) => (ps.find((p) => p.id === id) || {}).short_name || "";
+    $("#admInv").innerHTML = mem.filter((m) => m.role !== "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b>${m.id === ME.id ? ' <span class="pill p-q">YOU</span>' : ""}</td><td class="small">${ROLE[m.role]} ${m.party_id ? "· " + esc(pShort(m.party_id)) : ""}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td>
+      <td>${m.id === ME.id || !["party_admin", "sys_admin"].includes(m.role) ? "" : `<button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button>`}</td></tr>`).join("") +
+      inv.filter((i) => !i.used_by && !i.revoked && i.role !== "counter" && new Date(i.expires_at) > new Date()).map((i) => `<tr><td>${esc(i.label || "(no name)")} <span class="small muted">${esc(i.code)}</span></td><td class="small">${ROLE[i.role]}${i.party_id ? " · " + esc(pShort(i.party_id)) : ""}</td><td><span class="pill p-unv">NOT USED YET</span></td>
+      <td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("") || '<tr><td class="muted">No invites yet.</td></tr>';
+    $$("#admInv [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); load(); }, "Invite cancelled. The link no longer works.")));
+    $$("#admInv [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this person's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); load(); }, "Access updated."); }));
     $("#batches").innerHTML = bs.map((b) => `<tr><td class="small">${new Date(b.uploaded_at).toLocaleString()}</td><td class="r">${b.row_count}</td><td>${b.errors.length ? `<span class="pill p-flag">${b.errors.length} problems</span>` : '<span class="pill p-ok">OK</span>'}</td><td>${b.status.toUpperCase()}</td>
       <td>${b.status === "pending" ? `${!b.errors.length && b.uploaded_by !== ME.id ? `<button class="btn sm" data-ap="${b.id}">Approve</button>` : b.uploaded_by === ME.id ? '<span class="small muted">needs 2nd admin</span>' : ""} <button class="btn sm ghost" data-rj="${b.id}">Reject</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">No uploads yet.</td></tr>';
     $$("[data-ap]").forEach((b) => (b.onclick = () => confirm("Load these stations into the live system?") && guard(async () => { await API.decideImport(b.dataset.ap, true); load(); }, "Stations loaded.")));
@@ -879,7 +912,7 @@ async function viewCount() {
   <div class="grid two">
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Invite a neutral station counter</h3>
-        <p class="small muted" style="margin-top:0">One per polling station. A counter belongs to no party; their running total of voters is the figure every party sees on the National Watch.</p>
+        <div class="explain"><b>What is a counter?</b> One trusted person inside each polling station who belongs to <b>no party</b>, ideally the presiding officer or poll clerk. Each time a voter is ticked off in the poll book they tap <b>+1</b> on their phone. That number is the true turnout every party sees on the National Watch.<br><span class="muted">No counters? That's fine: the National Watch then uses the parties' own agents' counts.</span></div>
         <label class="f">Constituency</label><select class="inp" id="kC">${CONSTS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
         <label class="f">Polling station</label><select class="inp" id="kS"></select>
         <label class="f">Person's name (for your records)</label><input class="inp" id="kLabel" maxlength="80">
@@ -906,27 +939,26 @@ async function viewCount() {
   $("#dParty").innerHTML = parties.map((p) => `<option value="${p.id}">${esc(p.short_name)} — ${esc(p.name)}</option>`).join("") + '<option value="">Independent / not on the platform</option>';
   const indToggle = () => $("#dIndWrap").classList.toggle("hide", $("#dParty").value !== ""); $("#dParty").onchange = indToggle; indToggle();
   let kStations = [], oStations = [], oMode = "turnout";
-  const fill = async (sel, cid) => { const xs = await API.stations(cid); $(sel).innerHTML = xs.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || "<option value=''>No stations loaded yet</option>"; return xs; };
+  const fill = async (sel, cid) => { const xs = await API.stations(cid); $(sel).innerHTML = xs.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || noStations(true); return xs; };
   $("#kC").onchange = async () => (kStations = await fill("#kS", +$("#kC").value));
   $("#oC").onchange = async () => { oStations = await fill("#oS", +$("#oC").value); oBody(); };
   $("#oS").onchange = () => oBody();
   $$("#oMode button").forEach((b) => (b.onclick = () => { oMode = b.dataset.m; $$("#oMode button").forEach((x) => x.classList.toggle("on", x === b)); oBody(); }));
   kStations = await fill("#kS", +$("#kC").value); oStations = await fill("#oS", +$("#oC").value);
   $("#kGo").onclick = () => guard(async () => {
-    const sid = $("#kS").value; if (!sid) throw new Error("Load the official station list first."); const st = kStations.find((x) => x.id === sid), label = $("#kLabel").value.trim();
+    const sid = $("#kS").value; if (!sid) throw new Error("There are no polling stations yet. Load practice stations on the System admin tab first."); const st = kStations.find((x) => x.id === sid), label = $("#kLabel").value.trim();
     const code = await API.createInvite({ role: "counter", station: sid, label: label || "Counter " + st.official_code });
     const link = `${location.origin}${location.pathname}#invite=${code}`;
-    const msg = `${label ? label + ", y" : "Y"}ou are invited to Vote Watch Dominica as the NEUTRAL station counter for ${st.official_code} (${st.name}).\nOpen: ${link}\nInvite code: ${code}\nThis code is for you only. Do not share it.`;
-    $("#kOut").innerHTML = `<div class="codebox">${esc(code)}</div><textarea class="inp" rows="5" style="margin-top:8px" readonly>${esc(msg)}</textarea><button class="btn sm ghost" id="kCopy" style="margin-top:6px">Copy message to send by WhatsApp/SMS</button>`;
-    $("#kCopy").onclick = () => navigator.clipboard.writeText(msg).then(() => toast("Copied.")); $("#kLabel").value = ""; loadCounters();
+    inviteSent($("#kOut"), { code, msg: inviteMsg(label, `the neutral station counter at ${st.official_code} (${st.name}). You belong to no party: you tap +1 each time a voter is ticked off`, link), who: label || "the counter" });
+    $("#kLabel").value = ""; loadCounters();
   });
   async function loadCounters() {
     const [mem, inv, all] = await Promise.all([API.members(), API.invites(), API.stations()]); const stName = (id) => (all.find((s) => s.id === id) || {}).official_code || "—";
     $("#kRows").innerHTML = mem.filter((m) => m.role === "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b></td><td class="small">${esc((m.assignments || []).map((a) => stName(a.station_id)).join(", "))}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td>
       <td><button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button></td></tr>`).join("") +
-      inv.filter((i) => i.role === "counter" && !i.used_by && !i.revoked).map((i) => `<tr><td><code>${esc(i.code)}</code> ${esc(i.label || "")}</td><td class="small">${esc(stName(i.station_id))}</td><td><span class="pill p-unv">INVITE OPEN</span></td><td><button class="btn sm warn" data-rev="${esc(i.code)}">Revoke</button></td></tr>`).join("") || '<tr><td colspan="4" class="muted">No counters yet.</td></tr>';
+      inv.filter((i) => i.role === "counter" && !i.used_by && !i.revoked).map((i) => `<tr><td><code>${esc(i.code)}</code> ${esc(i.label || "")}</td><td class="small">${esc(stName(i.station_id))}</td><td><span class="pill p-unv">NOT USED YET</span></td><td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("") || '<tr><td colspan="4" class="muted">No counters yet.</td></tr>';
     $$("#kRows [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this counter's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); loadCounters(); }, "Access updated."); }));
-    $$("#kRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadCounters(); }, "Invite revoked.")));
+    $$("#kRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadCounters(); }, "Invite cancelled. The link no longer works.")));
   }
   async function loadCands() {
     const cs = await API.candidates(+$("#dC").value, true);
@@ -942,7 +974,7 @@ async function viewCount() {
   }, "Candidate added.");
   async function oBody() {
     const el = $("#oBody"), sid = $("#oS").value, st = oStations.find((x) => x.id === sid);
-    if (!st) { el.innerHTML = '<p class="muted small">Load the official station list first.</p>'; return; }
+    if (!st) { el.innerHTML = '<p class="muted small">No polling stations yet. Load practice stations on the System admin tab to try this.</p>'; return; }
     const mine = await API.myCounts(st.id), offC = mine.counts.find((c) => c.source === "official" && !c.superseded), offR = mine.results.find((r) => r.source === "official" && !r.superseded);
     if (oMode === "turnout") {
       el.innerHTML = `${offC ? `<div class="receipt">Official turnout already entered: <b class="num">${fmt(offC.voted)}</b> at ${hhmm(offC.received_at)}. Entering a new figure replaces it (the old one stays on record).</div>` : ""}
@@ -971,8 +1003,81 @@ function parseCSV(text) {
   return clean.map((r) => Object.fromEntries(head.map((h, i) => [h, (r[i] || "").trim()])));
 }
 
+
+// ------------------------------------------------------------------ station opening & closing (rep and neutral counter)
+// One tap records the time. "Different time?" lets them enter the real time if they tap late. Saved on the phone with no signal.
+function openClose(el, st) {
+  const key = (k) => `vw_oc_${k}_${st.id}`;
+  const get = (k) => { try { return JSON.parse(localStorage.getItem(key(k)) || "null"); } catch { return null; } };
+  const draw = () => { const o = get("opened"), c = get("closed");
+    el.innerHTML = `<div class="oc"><button class="ocb ${o ? "done" : ""}" data-k="opened">${o ? "✅ Opened " + hhmm(o.at) : "🟢 Station has opened"}<small>${o ? (o.queued ? "saved, sending when there is signal" : "sent · tap to correct") : "tap the moment voting starts"}</small></button>
+      <button class="ocb ${c ? "done cl" : ""}" data-k="closed">${c ? "🔒 Closed " + hhmm(c.at) : "🔴 Station has closed"}<small>${c ? (c.queued ? "saved, sending when there is signal" : "sent · tap to correct") : "tap when the doors close"}</small></button></div>`;
+    $$(".ocb", el).forEach((b) => (b.onclick = () => ask(b.dataset.k))); };
+  const ask = (k) => {
+    const now = API.now(), hh = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+    el.innerHTML = `<div class="card" style="margin:10px 0"><b>${k === "opened" ? "When did the station open?" : "When did the station close?"}</b>
+      <div class="row" style="margin-top:8px"><input class="inp num" id="ocT" type="time" value="${hh}" style="max-width:140px;font-size:18px"><button class="btn" id="ocGo">Send</button><button class="btn ghost" id="ocNo">Cancel</button></div>
+      <p class="small muted" style="margin-bottom:0">It shows the time now. Change it only if it ${k === "opened" ? "opened" : "closed"} earlier.</p></div>`;
+    $("#ocNo").onclick = draw;
+    $("#ocGo").onclick = () => guard(async () => {
+      const [h, m] = $("#ocT").value.split(":").map(Number); if (!(h >= 0)) throw new Error("Choose a time.");
+      const at = new Date(API.now()); at.setHours(h, m, 0, 0); if (at > new Date(API.now().getTime() + 5 * 60000)) throw new Error("That time is still to come.");
+      const r = await send("event", { station: st.id, kind: k, at: at.toISOString(), key: newKey() });
+      localStorage.setItem(key(k), JSON.stringify({ at: at.toISOString(), queued: !!r?.queued })); draw();
+    }, k === "opened" ? "Opening time sent." : "Closing time sent.");
+  };
+  draw();
+}
+
+// ------------------------------------------------------------------ SYSTEM ADMIN: media outlets, poll times, broadcast
+async function viewMedia() {
+  const local = (iso) => { if (!iso) return ""; const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+  $("#main").innerHTML = `<div class="row" style="margin-bottom:12px"><b style="font-size:16px">Media &amp; poll times</b><span class="muted small">Paying news outlets and the public broadcast. You collect any fee yourself; this screen only switches access on and off.</span></div>
+  <div class="grid two">
+    <div class="grid" style="align-content:start">
+      <div class="card"><h3>Invite a news outlet</h3>
+        <div class="explain">Each outlet gets <b>its own login</b>. Their name shows on their screen ("ON DBS RADIO"), so a copy shown elsewhere can be traced. Switch them off at any time.</div>
+        <label class="f">Outlet's name</label><input class="inp" id="mName" maxlength="60" placeholder="e.g. DBS Radio">
+        <label class="f">Package</label><select class="inp" id="mLive"><option value="1">Live all day: turnout during voting, then the results</option><option value="0">After the polls close: results night only</option></select>
+        <button class="btn" style="margin-top:10px" id="mGo">Create invite</button><div id="mOut" style="margin-top:12px"></div></div>
+      <div class="card"><h3>Poll times</h3>
+        <p class="small" style="margin-top:0">"After close" outlets open when the polls close. Change these for a rehearsal, then set them back.</p>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px"><div><label class="f">Polls open</label><input class="inp" type="datetime-local" id="pOpen" value="${local(SETTINGS?.poll_open)}"></div>
+          <div><label class="f">Polls close</label><input class="inp" type="datetime-local" id="pClose" value="${local(SETTINGS?.poll_close)}"></div></div>
+        <button class="btn" style="margin-top:10px" id="pGo">Save poll times</button></div>
+    </div>
+    <div class="grid" style="align-content:start">
+      <div class="card"><h3>News outlets</h3><div class="tw" style="max-height:380px"><table><thead><tr><th>Outlet</th><th>Package</th><th>Access</th><th></th></tr></thead><tbody id="mRows"></tbody></table></div></div>
+      <div class="card"><h3>Broadcast to the public</h3>
+        <p class="small" style="margin-top:0">Open the <b>Broadcast screen</b>, press <b>Full screen</b>, and stream that window live with <b>OBS Studio</b> (free) or <b>StreamYard</b> to Facebook, YouTube or TikTok. Add your own camera and a host talking over it.</p>
+        <button class="btn" id="toBc">📺 Open the broadcast screen</button></div>
+    </div></div>`;
+  $("#toBc").onclick = () => go("broadcast");
+  $("#pGo").onclick = () => guard(async () => { const o = $("#pOpen").value, c = $("#pClose").value; if (!o || !c) throw new Error("Choose both times.");
+    await API.setPollTimes(new Date(o).toISOString(), new Date(c).toISOString()); SETTINGS = await API.appSettings(); }, "Poll times saved.");
+  $("#mGo").onclick = () => guard(async () => { const name = $("#mName").value.trim(), live = $("#mLive").value === "1"; if (!name) throw new Error("Type the outlet's name.");
+    const code = await API.createMediaInvite(name, live), link = `${location.origin}${location.pathname}#invite=${code}`;
+    inviteSent($("#mOut"), { code, msg: inviteMsg("", `the news outlet ${name} (${live ? "live all day" : "results after the polls close"}). Your screen shows your outlet's name`, link), who: name });
+    $("#mName").value = ""; load(); });
+  async function load() {
+    const [mem, inv, out] = await Promise.all([API.members(), API.invites(), API.mediaOutlets()]);
+    const rows = mem.filter((m) => m.role === "media").map((m) => { const o = out.find((x) => x.user_id === m.id) || {};
+      return `<tr><td><b>${esc(o.outlet || m.full_name)}</b><div class="small muted">${esc(m.full_name)}</div></td>
+        <td><button class="btn sm ghost" data-live="${m.id}" data-to="${o.live ? 0 : 1}">${o.live ? "Live all day" : "After close only"}</button></td>
+        <td>${m.active ? '<span class="pill p-ok">ON</span>' : '<span class="pill p-none">OFF</span>'}</td>
+        <td><button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Switch off" : "Switch on"}</button></td></tr>`; }).join("") +
+      inv.filter((i) => i.role === "media" && !i.used_by && !i.revoked && new Date(i.expires_at) > new Date()).map((i) => `<tr><td><b>${esc(i.media_outlet || i.label)}</b></td><td class="small">${i.media_live === false ? "After close only" : "Live all day"}</td><td><span class="pill p-unv">NOT USED YET</span></td>
+        <td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("");
+    $("#mRows").innerHTML = rows || '<tr><td colspan="4" class="muted">No news outlets yet.</td></tr>';
+    $$("#mRows [data-live]").forEach((b) => (b.onclick = () => guard(async () => { await API.setMediaLive(b.dataset.live, b.dataset.to === "1"); load(); }, "Package changed.")));
+    $$("#mRows [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Switch this outlet off now? Their screen stops at once.")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); load(); }, "Access updated."); }));
+    $$("#mRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); load(); }, "Invite cancelled. The link no longer works.")));
+  }
+  REFRESH = null; await guard(load);
+}
+
 // ------------------------------------------------------------------ boot
-const VIEWS = { national: viewNational, station: viewStation, watch: viewWatch, hq: viewHQ, team: viewTeam, admin: viewAdmin, counter: viewCounter, count: viewCount };
+const VIEWS = { national: viewNational, station: viewStation, watch: viewWatch, hq: viewHQ, team: viewTeam, admin: viewAdmin, counter: viewCounter, count: viewCount, media: viewMedia, broadcast: () => window.viewBroadcast() };
 let booted = false, bootSeq = 0;
 async function boot() {
   const my = ++bootSeq, stale = () => my !== bootSeq; // only the most recent start-up may draw the screen
@@ -989,6 +1094,7 @@ async function boot() {
     if (!ME.role) { paintShell(); return redeemScreen(); }
     if (ME.active === false) { paintShell(); $("#main").innerHTML = '<div class="card">Your access has been removed. Contact your party administrator.</div>'; return; }
     const cs = await API.constituencies(); if (stale()) return; CONSTS = cs;
+    try { SETTINGS = await API.appSettings(); } catch (e) { SETTINGS = null; } if (stale()) return;
     const tabs = tabsFor(ME.role).map((t) => t[0]);
     if (!tabs.includes(VIEW)) VIEW = tabs[0];
     paintShell(); go(VIEW);
