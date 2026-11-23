@@ -8,6 +8,38 @@ const fmt = (n) => (n === null || n === undefined ? "—" : Math.round(n).toLoca
 const pct = (a, b) => (b ? ((a / b) * 100).toFixed(0) + "%" : "—");
 const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—");
 const mins = (iso) => (iso ? (API.now() - new Date(iso)) / 60000 : Infinity);
+// this phone/computer's own id (kept in the browser), used for the one-device-per-person rule
+const DEVICE = (() => { try { let d = localStorage.getItem("vw_device_id"); if (!d) { d = "dev-" + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(16) + Math.random().toString(16).slice(2)); localStorage.setItem("vw_device_id", d); } return d; } catch { return "dev-nostore-" + Date.now().toString(16); } })();
+const deviceLabel = () => { const u = navigator.userAgent;
+  const os = /iPhone/.test(u) ? "iPhone" : /iPad/.test(u) ? "iPad" : /Android/.test(u) ? (/Mobile/.test(u) ? "Android phone" : "Android tablet") : /Windows/.test(u) ? "Windows computer" : /Mac OS X/.test(u) ? "Mac" : /CrOS/.test(u) ? "Chromebook" : /Linux/.test(u) ? "Linux computer" : "Device";
+  const br = /Edg\//.test(u) ? "Edge" : /SamsungBrowser/.test(u) ? "Samsung Internet" : /CriOS|Chrome\//.test(u) ? "Chrome" : /FxiOS|Firefox\//.test(u) ? "Firefox" : /Safari\//.test(u) ? "Safari" : "browser";
+  return os + " · " + br; };
+// faint name watermark on the national and broadcast screens, so a photo or recording can be traced back
+function addWatermark(el) {
+  if (!el || !ME || ME.role === "sys_admin") return;
+  const t = `${ME.full_name || ""} · ${ME.email || ""} · ${new Date().toLocaleDateString()}`.replace(/[<&>"]/g, "");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="560" height="260"><text x="20" y="150" transform="rotate(-18 280 130)" font-family="Arial,sans-serif" font-size="20" fill="#000" fill-opacity="0.075">${t}</text></svg>`;
+  const w = document.createElement("div"); w.className = "wm"; w.setAttribute("aria-hidden", "true");
+  w.style.backgroundImage = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; el.style.position = el.style.position || "relative"; el.appendChild(w);
+}
+// device and sign-in log cells for administrators' people lists
+function devCell(id, D) { const d = D && D[id]; if (!d) return '<span class="small muted">—</span>';
+  return `<span class="small">${d.devices ? d.devices + (d.devices > 1 ? " devices" : " device") : "not signed in yet"}${d.last_ip ? " · " + esc(d.last_ip) : ""}${d.last_seen ? " · " + hhmm(d.last_seen) : ""}</span>${d.refused ? ` <span class="pill p-flag" title="Someone tried to use this account on another device">${d.refused} REFUSED</span>` : ""}`; }
+const devBtns = (id) => (id === ME.id ? "" : `<button class="btn sm ghost" data-dlog="${id}">Sign-in log</button> <button class="btn sm ghost" data-dreset="${id}">Reset device</button>`);
+const ACT = { opened_app: "Opened the app", new_device: "New device registered", device_refused: "⚠ REFUSED: another device", devices_reset: "Devices reset by administrator",
+  sent_submissions: "Sent a turnout count", sent_support_estimates: "Sent supporters figure", sent_incidents: "Reported an incident", sent_station_counts: "Sent a neutral count",
+  sent_station_results: "Sent the count after close", sent_station_events: "Sent opening/closing time" };
+function wireDev(root, reload) {
+  $$("[data-dreset]", root).forEach((b) => (b.onclick = () => { if (!confirm("Reset this person's device?\n\nUse this when they changed or lost their phone. The next phone or computer they open the app on becomes their device, and the old one stops working.")) return;
+    guard(async () => { await API.resetDevices(b.dataset.dreset); reload && reload(); }, "Device reset. They can now sign in on their new phone."); }));
+  $$("[data-dlog]", root).forEach((b) => (b.onclick = () => guard(async () => {
+    const rows = await API.accessLog(b.dataset.dlog, 150), name = b.closest("tr")?.querySelector("b")?.textContent || "";
+    const ov = document.createElement("div"); ov.className = "ovl"; ov.innerHTML = `<div class="card ovc"><div class="row"><h3 style="margin:0">Sign-in log · ${esc(name)}</h3><button class="btn sm ghost" style="margin-left:auto" data-x>Close</button></div>
+      <p class="small muted">Every time this account opens the app or sends something, the time, device and internet (IP) address are recorded. Phones change IP addresses during the day; that is normal. Look for <b>REFUSED</b> lines: someone tried to use the account on another device.</p>
+      <div class="tw" style="max-height:60vh"><table><thead><tr><th>Time</th><th>What</th><th>Device</th><th>IP address</th></tr></thead><tbody>${rows.map((r) => `<tr class="${r.action === "device_refused" ? "flagrow" : ""}"><td class="small">${new Date(r.at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false })}</td><td class="small">${esc(ACT[r.action] || r.action.replace(/_/g, " "))}</td><td class="small">${esc(r.device || "")}</td><td class="small num">${esc(r.ip || "—")}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">Nothing recorded yet.</td></tr>'}</tbody></table></div></div>`;
+    document.body.appendChild(ov); ov.onclick = (e) => { if (e.target === ov || e.target.hasAttribute("data-x")) ov.remove(); };
+  })));
+}
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : "k" + Date.now() + Math.random().toString(16).slice(2));
 // tap counters are kept on the phone so a tap is never lost; the running total is what gets sent
 const tallyKey = (kind, sid) => `vw_tally_${kind}_${ME?.id}_${sid}`;
@@ -292,6 +324,7 @@ async function viewNational() {
   <div class="seg noprint" id="natView" style="margin-bottom:12px"><button data-v="turnout">🗳 Turnout · who is going</button><button data-v="results">📊 Results · the count after close</button></div>
   <div id="natBody"></div>`;
   $$("#natView button").forEach((b) => { b.classList.toggle("on", b.dataset.v === SEL.natView); b.onclick = () => { SEL.natView = b.dataset.v; SEL.natC = null; viewNational(); }; });
+  addWatermark($("#main"));
   return SEL.natView === "results" ? natResults() : natTurnout();
 }
 
@@ -810,7 +843,7 @@ async function viewTeam() {
     </div>
     <div class="grid" style="align-content:start">
       <div class="card"><h3>Invites</h3><div class="tw" style="max-height:300px"><table><thead><tr><th>Code</th><th>For</th><th>Role · where</th><th>Status</th><th></th></tr></thead><tbody id="invRows"></tbody></table></div></div>
-      <div class="card"><h3>Team members</h3><div class="tw" style="max-height:340px"><table><thead><tr><th>Name</th><th>Role</th><th>Assigned to</th><th>Access</th></tr></thead><tbody id="memRows"></tbody></table></div></div>
+      <div class="card"><h3>Team members</h3><div class="tw" style="max-height:340px"><table><thead><tr><th>Name</th><th>Role</th><th>Assigned to</th><th>Device &amp; sign-ins</th><th>Access</th></tr></thead><tbody id="memRows"></tbody></table></div></div>
       <div class="card"><h3>Audit log (${esc(P.short_name)})</h3><div class="feed" id="audit"></div></div>
     </div></div>`;
   let stations = [];
@@ -832,13 +865,14 @@ async function viewTeam() {
   const allSt = await API.stations(); const stName = (id) => (allSt.find((s) => s.id === id) || {}).official_code || "";
   const asg = (a) => a.map((x) => (x.station_id ? stName(x.station_id) : cName(x.constituency_id))).join(", ") || "—";
   async function loadLists() {
-    const [inv, mem, aud] = await Promise.all([API.invites(), API.members(), API.audit()]);
+    const [inv, mem, aud, DV] = await Promise.all([API.invites(), API.members(), API.audit(), API.memberDevices().catch(() => ({}))]);
     $("#invRows").innerHTML = inv.map((i) => { const st = i.used_by ? '<span class="pill p-ok">USED</span>' : i.revoked ? '<span class="pill p-none">REVOKED</span>' : new Date(i.expires_at) < new Date() ? '<span class="pill p-none">EXPIRED</span>' : '<span class="pill p-unv">OPEN</span>';
       return `<tr><td class="num"><code>${esc(i.code)}</code></td><td>${esc(i.label || "")}</td><td class="small">${ROLE[i.role]}${i.station_id ? " · " + esc(stName(i.station_id)) : i.constituency_id ? " · " + esc(cName(i.constituency_id)) : ""}</td><td>${st}</td><td>${!i.used_by && !i.revoked ? `<button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button>` : ""}</td></tr>`; }).join("") || '<tr><td colspan="5" class="muted">No invites yet.</td></tr>';
     $$("[data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadLists(); }, "Invite cancelled. The link no longer works.")));
     $("#memRows").innerHTML = mem.map((m) => `<tr><td><b>${esc(m.full_name)}</b>${m.id === ME.id ? ' <span class="pill p-q">YOU</span>' : ""}</td><td class="small">${ROLE[m.role]}</td><td class="small">${esc(asg(m.assignments || []))}</td>
-      <td>${m.id === ME.id ? "" : `<button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button>`}</td></tr>`).join("");
+      <td>${devCell(m.id, DV)}<div>${devBtns(m.id)}</div></td><td>${m.id === ME.id ? "" : `<button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button>`}</td></tr>`).join("");
     $$("[data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this person's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); loadLists(); }, "Access updated."); }));
+    wireDev($("#memRows"), loadLists);
     $("#audit").innerHTML = aud.map((a) => `<div class="it"><span class="t">${hhmm(a.at)}</span><div><b>${esc(a.action.replace(/_/g, " "))}</b> <span class="muted small">${esc(a.entity || "")} ${esc(a.entity_id || "")}</span></div></div>`).join("") || '<p class="muted small">Nothing yet.</p>';
   }
   REFRESH = loadLists; await guard(loadLists);
@@ -887,17 +921,18 @@ async function viewAdmin() {
     guard(async () => { const r = await API.uploadImport(rows); $("#csvOut").innerHTML = `<span class="pill ${r.errors.length ? "p-flag" : "p-ok"}">${r.errors.length ? r.errors.length + " PROBLEM(S)" : "CHECKS PASSED"}</span> ${rows.length} rows uploaded. ${r.errors.length ? "Fix and upload again:" : "Ask the second administrator to approve."}<ul>${r.errors.slice(0, 15).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`; load(); });
   };
   async function load() {
-    const [ps, inv, bs, st, mem, aud] = await Promise.all([API.parties(), API.invites(), API.imports(), API.stations(), API.members(), API.audit()]);
+    const [ps, inv, bs, st, mem, aud, DV] = await Promise.all([API.parties(), API.invites(), API.imports(), API.stations(), API.members(), API.audit(), API.memberDevices().catch(() => ({}))]);
     $("#parties").innerHTML = ps.map((p) => `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)"><span style="width:14px;height:14px;border-radius:50%;background:${esc(p.color)}"></span><b>${esc(p.name)}</b><span class="muted">${esc(p.short_name)}</span><span class="small muted" style="margin-left:auto">${p.share_counts ? "shares turnout" : "turnout private"}</span></div>`).join("") || '<p class="muted small">No parties yet.</p>';
     const keepP = $("#aParty").value; // never reset the person's choice while the list refreshes
     $("#aParty").innerHTML = ps.map((p) => `<option value="${p.id}" ${p.id === keepP ? "selected" : ""}>${esc(p.name)}</option>`).join("") || '<option value="">Add a party first (box above)</option>';
     const pShort = (id) => (ps.find((p) => p.id === id) || {}).short_name || "";
-    $("#admInv").innerHTML = mem.filter((m) => m.role !== "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b>${m.id === ME.id ? ' <span class="pill p-q">YOU</span>' : ""}</td><td class="small">${ROLE[m.role]} ${m.party_id ? "· " + esc(pShort(m.party_id)) : ""}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td>
+    $("#admInv").innerHTML = mem.filter((m) => m.role !== "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b>${m.id === ME.id ? ' <span class="pill p-q">YOU</span>' : ""}</td><td class="small">${ROLE[m.role]} ${m.party_id ? "· " + esc(pShort(m.party_id)) : ""}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}<div>${devCell(m.id, DV)}</div><div>${devBtns(m.id)}</div></td>
       <td>${m.id === ME.id || !["party_admin", "sys_admin"].includes(m.role) ? "" : `<button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button>`}</td></tr>`).join("") +
       inv.filter((i) => !i.used_by && !i.revoked && i.role !== "counter" && new Date(i.expires_at) > new Date()).map((i) => `<tr><td>${esc(i.label || "(no name)")} <span class="small muted">${esc(i.code)}</span></td><td class="small">${ROLE[i.role]}${i.party_id ? " · " + esc(pShort(i.party_id)) : ""}</td><td><span class="pill p-unv">NOT USED YET</span></td>
       <td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("") || '<tr><td class="muted">No invites yet.</td></tr>';
     $$("#admInv [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); load(); }, "Invite cancelled. The link no longer works.")));
     $$("#admInv [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this person's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); load(); }, "Access updated."); }));
+    wireDev($("#admInv"), load);
     $("#batches").innerHTML = bs.map((b) => `<tr><td class="small">${new Date(b.uploaded_at).toLocaleString()}</td><td class="r">${b.row_count}</td><td>${b.errors.length ? `<span class="pill p-flag">${b.errors.length} problems</span>` : '<span class="pill p-ok">OK</span>'}</td><td>${b.status.toUpperCase()}</td>
       <td>${b.status === "pending" ? `${!b.errors.length && b.uploaded_by !== ME.id ? `<button class="btn sm" data-ap="${b.id}">Approve</button>` : b.uploaded_by === ME.id ? '<span class="small muted">needs 2nd admin</span>' : ""} <button class="btn sm ghost" data-rj="${b.id}">Reject</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">No uploads yet.</td></tr>';
     $$("[data-ap]").forEach((b) => (b.onclick = () => confirm("Load these stations into the live system?") && guard(async () => { await API.decideImport(b.dataset.ap, true); load(); }, "Stations loaded.")));
@@ -940,12 +975,13 @@ async function viewCount() {
   $("#dParty").innerHTML = parties.map((p) => `<option value="${p.id}">${esc(p.short_name)} — ${esc(p.name)}</option>`).join("") + '<option value="">Independent / not on the platform</option>';
   const indToggle = () => $("#dIndWrap").classList.toggle("hide", $("#dParty").value !== ""); $("#dParty").onchange = indToggle; indToggle();
   let kStations = [], oStations = [], oMode = "turnout";
-  const fill = async (sel, cid) => { const xs = await API.stations(cid); $(sel).innerHTML = xs.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || noStations(true); return xs; };
+  const fillSeq = {}; // only the latest request for each list may draw it (a slow early answer must not overwrite a newer choice)
+  const fill = async (sel, cid) => { const my = (fillSeq[sel] = (fillSeq[sel] || 0) + 1); const xs = await API.stations(cid); if (my !== fillSeq[sel]) return sel === "#kS" ? kStations : oStations; $(sel).innerHTML = xs.map((s) => `<option value="${s.id}">${esc(s.official_code)} — ${esc(s.name)}</option>`).join("") || noStations(true); return xs; };
   $("#kC").onchange = async () => (kStations = await fill("#kS", +$("#kC").value));
   $("#oC").onchange = async () => { oStations = await fill("#oS", +$("#oC").value); oBody(); };
   $("#oS").onchange = () => oBody();
   $$("#oMode button").forEach((b) => (b.onclick = () => { oMode = b.dataset.m; $$("#oMode button").forEach((x) => x.classList.toggle("on", x === b)); oBody(); }));
-  kStations = await fill("#kS", +$("#kC").value); oStations = await fill("#oS", +$("#oC").value);
+  { const k = await fill("#kS", +$("#kC").value), o = await fill("#oS", +$("#oC").value); kStations = k; oStations = o; }
   $("#kGo").onclick = () => guard(async () => {
     const sid = $("#kS").value; if (!sid) throw new Error("There are no polling stations yet. Load practice stations on the System admin tab first."); const st = kStations.find((x) => x.id === sid), label = $("#kLabel").value.trim();
     const code = await API.createInvite({ role: "counter", station: sid, label: label || "Counter " + st.official_code });
@@ -954,12 +990,13 @@ async function viewCount() {
     $("#kLabel").value = ""; loadCounters();
   });
   async function loadCounters() {
-    const [mem, inv, all] = await Promise.all([API.members(), API.invites(), API.stations()]); const stName = (id) => (all.find((s) => s.id === id) || {}).official_code || "—";
-    $("#kRows").innerHTML = mem.filter((m) => m.role === "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b></td><td class="small">${esc((m.assignments || []).map((a) => stName(a.station_id)).join(", "))}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}</td>
+    const [mem, inv, all, DV] = await Promise.all([API.members(), API.invites(), API.stations(), API.memberDevices().catch(() => ({}))]); const stName = (id) => (all.find((s) => s.id === id) || {}).official_code || "—";
+    $("#kRows").innerHTML = mem.filter((m) => m.role === "counter").map((m) => `<tr><td><b>${esc(m.full_name)}</b></td><td class="small">${esc((m.assignments || []).map((a) => stName(a.station_id)).join(", "))}</td><td>${m.active ? '<span class="pill p-ok">ACTIVE</span>' : '<span class="pill p-none">REMOVED</span>'}<div>${devCell(m.id, DV)}</div><div>${devBtns(m.id)}</div></td>
       <td><button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Remove access" : "Restore"}</button></td></tr>`).join("") +
       inv.filter((i) => i.role === "counter" && !i.used_by && !i.revoked).map((i) => `<tr><td><code>${esc(i.code)}</code> ${esc(i.label || "")}</td><td class="small">${esc(stName(i.station_id))}</td><td><span class="pill p-unv">NOT USED YET</span></td><td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("") || '<tr><td colspan="4" class="muted">No counters yet.</td></tr>';
     $$("#kRows [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Remove this counter's access now?")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); loadCounters(); }, "Access updated."); }));
     $$("#kRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); loadCounters(); }, "Invite cancelled. The link no longer works.")));
+    wireDev($("#kRows"), loadCounters);
   }
   async function loadCands() {
     const cs = await API.candidates(+$("#dC").value, true);
@@ -1061,11 +1098,11 @@ async function viewMedia() {
     inviteSent($("#mOut"), { code, msg: inviteMsg("", `the news outlet ${name} (${live ? "live all day" : "results after the polls close"}). Your screen shows your outlet's name`, link), who: name });
     $("#mName").value = ""; load(); });
   async function load() {
-    const [mem, inv, out] = await Promise.all([API.members(), API.invites(), API.mediaOutlets()]);
+    const [mem, inv, out, DV] = await Promise.all([API.members(), API.invites(), API.mediaOutlets(), API.memberDevices().catch(() => ({}))]);
     const rows = mem.filter((m) => m.role === "media").map((m) => { const o = out.find((x) => x.user_id === m.id) || {};
       return `<tr><td><b>${esc(o.outlet || m.full_name)}</b><div class="small muted">${esc(m.full_name)}</div></td>
         <td><button class="btn sm ghost" data-live="${m.id}" data-to="${o.live ? 0 : 1}">${o.live ? "Live all day" : "After close only"}</button></td>
-        <td>${m.active ? '<span class="pill p-ok">ON</span>' : '<span class="pill p-none">OFF</span>'}</td>
+        <td>${m.active ? '<span class="pill p-ok">ON</span>' : '<span class="pill p-none">OFF</span>'}<div>${devCell(m.id, DV)}</div><div>${devBtns(m.id)}</div></td>
         <td><button class="btn sm ${m.active ? "warn" : ""}" data-act="${m.id}" data-on="${m.active ? 0 : 1}">${m.active ? "Switch off" : "Switch on"}</button></td></tr>`; }).join("") +
       inv.filter((i) => i.role === "media" && !i.used_by && !i.revoked && new Date(i.expires_at) > new Date()).map((i) => `<tr><td><b>${esc(i.media_outlet || i.label)}</b></td><td class="small">${i.media_live === false ? "After close only" : "Live all day"}</td><td><span class="pill p-unv">NOT USED YET</span></td>
         <td><button class="btn sm warn" data-rev="${esc(i.code)}">Cancel invite</button></td></tr>`).join("");
@@ -1073,6 +1110,7 @@ async function viewMedia() {
     $$("#mRows [data-live]").forEach((b) => (b.onclick = () => guard(async () => { await API.setMediaLive(b.dataset.live, b.dataset.to === "1"); load(); }, "Package changed.")));
     $$("#mRows [data-act]").forEach((b) => (b.onclick = () => { if (b.dataset.on === "0" && !confirm("Switch this outlet off now? Their screen stops at once.")) return; guard(async () => { await API.setMemberActive(b.dataset.act, b.dataset.on === "1"); load(); }, "Access updated."); }));
     $$("#mRows [data-rev]").forEach((b) => (b.onclick = () => guard(async () => { await API.revokeInvite(b.dataset.rev); load(); }, "Invite cancelled. The link no longer works.")));
+    wireDev($("#mRows"), load);
   }
   REFRESH = null; await guard(load);
 }
@@ -1090,10 +1128,19 @@ async function boot() {
     if (API.mode === "live" && window.VW_RECOVERY) { ME = null; paintShell(); return authScreen("reset"); }
     const has = await API.session(); if (stale()) return;
     if (!has) { ME = null; paintShell(); return authScreen(); }
+    // register this phone/computer first, so the rest of the start-up is read with the right permissions
+    const dv = await API.registerDevice(DEVICE, deviceLabel()); if (stale()) return;
     const me = await API.me(); if (stale()) return; ME = me;
     if (!ME) { paintShell(); return authScreen(); }
     if (!ME.role) { paintShell(); return redeemScreen(); }
     if (ME.active === false) { paintShell(); $("#main").innerHTML = '<div class="card">Your access has been removed. Contact your party administrator.</div>'; return; }
+    if (dv && dv.allowed === false) { paintShell(); const tb = $("#tabs"); if (tb) tb.innerHTML = ""; const who = ["counter", "media", "party_admin"].includes(ME.role) ? "the system administrator" : "your party administrator";
+      $("#main").innerHTML = `<div class="card" style="max-width:560px;margin:20px auto"><h3>🔒 This account is already in use on another device</h3>
+        <p>For safety, ${dv.limit === 1 ? "each polling agent and counter can use <b>one phone</b>" : `each person can use up to <b>${dv.limit} devices</b>`}. This ${esc(deviceLabel())} is not one of them, so nothing can be seen or sent from here.</p>
+        <p>Changed or lost your phone? Ask <b>${who}</b> to press <b>Reset device</b> next to your name, then tap <b>Try again</b>.</p>
+        <p class="small muted">This attempt has been recorded with the time and internet address.</p>
+        <div class="row"><button class="btn" id="dvAgain">Try again</button><button class="btn ghost" id="dvOut">Sign out</button></div></div>`;
+      $("#dvAgain").onclick = () => boot(); $("#dvOut").onclick = async () => { await API.signOut(); boot(); }; return; }
     const cs = await API.constituencies(); if (stale()) return; CONSTS = cs;
     try { SETTINGS = await API.appSettings(); } catch (e) { SETTINGS = null; } if (stale()) return;
     const tabs = tabsFor(ME.role).map((t) => t[0]);

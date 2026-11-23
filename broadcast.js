@@ -163,6 +163,7 @@
         <button class="btn sm" id="bcFs">⛶ Full screen</button>
         <span class="small muted">${API.mode === "demo" ? "Press Esc to leave full screen." : "Full screen, then stream this window with OBS Studio or StreamYard to Facebook, YouTube or TikTok. Press Esc to leave full screen."}</span></div>
       <div id="bcWrap">${stageHTML(label)}</div>`;
+    addWatermark(Q("#bcWrap"));
     drawMapSVG(); S = { ...S, prev: {}, queue: [], showing: false, ticks: [], ready: false, drawn: null, feat: null };
     $$("#bcCtl [data-m]").forEach((b) => (b.onclick = () => { if (b.dataset.m === "auto") S.manual = false; else { S.manual = true; S.mode = b.dataset.m; } load(); }));
     Q("#bcFs").onclick = () => { const w = Q("#bcWrap"); (w.requestFullscreen ? w.requestFullscreen() : Promise.reject()).catch(() => toast("Full screen is not available here.", true)); };

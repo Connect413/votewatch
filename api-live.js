@@ -52,6 +52,10 @@
         stations, constituencies: as.filter((a) => a.constituency_id).map((a) => a.constituency_id) };
     },
     redeem: (code, name) => rpc("redeem_invite", { p_code: code, p_full_name: name }),
+    registerDevice: (id, label) => rpc("register_device", { p_device: id, p_label: label || null }),
+    resetDevices: (user) => rpc("reset_devices", { p_user: user }),
+    async memberDevices() { return Object.fromEntries((await rpc("member_devices")).map((d) => [d.user_id, d])); },
+    accessLog: (user, limit) => rpc("access_log_for", { p_user: user, p_limit: limit || 100 }),
     async constituencies() { return ok(await sb.from("constituencies").select("*").order("name")); },
     async stations(cid) {
       let q = sb.from("polling_stations").select(STATION_SEL).eq("active", true).order("official_code");

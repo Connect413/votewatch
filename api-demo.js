@@ -257,6 +257,15 @@
         stations: u.station ? [stById[u.station]] : [], constituencies: u.constituency ? [u.constituency] : [] });
     },
     async redeem() { deny("Invites are not used in demo mode"); },
+    async registerDevice() { const u = me(); return { allowed: true, limit: { rep: 1, counter: 1, sys_admin: 1000 }[u?.role] || 2 }; },
+    async resetDevices() { return 1; },
+    async memberDevices() { const ip = (i) => "203.0.113." + (10 + i);
+      return Object.fromEntries(people.map((p, i) => [p.id, { user_id: p.id, devices: p.role === "rep" || p.role === "counter" ? 1 : 2, last_ip: ip(i), last_seen: T(OPEN - 20 + i * 7), refused: p.id === "u-rep" ? 1 : 0 }])); },
+    async accessLog(user) { const i = Math.max(0, people.findIndex((p) => p.id === user)), ip = "203.0.113." + (10 + i);
+      const rows = [{ at: T(OPEN - 1440), action: "new_device", ip, device: "Android phone · Chrome" }, { at: T(OPEN - 30), action: "opened_app", ip, device: "Android phone · Chrome" }];
+      if (user === "u-rep") rows.push({ at: T(OPEN + 95), action: "device_refused", ip: "198.51.100.23", device: "iPhone · Safari" });
+      rows.push({ at: T(Math.min(simMin, OPEN + 120)), action: "sent_submissions", ip: "203.0.113.77", device: "Android phone · Chrome" });
+      return R(rows.sort((a, b) => (a.at < b.at ? 1 : -1))); },
     constituencies: () => R([...constituencies].sort((a, b) => a.name.localeCompare(b.name))),
     stations: (cid) => R(stations.filter((s) => !cid || s.constituency_id === cid)),
     nationalSummary() {
