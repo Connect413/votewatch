@@ -893,7 +893,7 @@ async function viewAdmin() {
         <button class="btn" style="margin-top:10px" id="aGo">Create invite</button>
         <button class="btn sm ghost" id="sysInv">Invite a second system administrator (needed to approve station imports)</button><div id="aOut" style="margin-top:10px"></div></div>
       <div class="card"><h3>Invites &amp; administrators</h3><p class="small muted" style="margin-top:0">Made a mistake? <b>Cancel invite</b> stops a link that hasn't been used. <b>Remove access</b> locks out someone who already joined.</p><div class="tw" style="max-height:320px"><table><tbody id="admInv"></tbody></table></div></div>
-      <div class="card"><h3>Practice stations</h3><p class="small" style="margin-top:0">Until the Electoral Office's official list is loaded there are no polling stations, so nobody can be invited to a station. Load <b>practice stations</b> (2 per constituency, named "Practice station … (not real)") to try everything and rehearse. Remove them before the real list goes in.</p>
+      <div class="card"><h3>Practice stations</h3><p class="small" style="margin-top:0">Until the Electoral Office's official list is loaded there are no polling stations, so nobody can be invited to a station. Load <b>practice stations</b> (2 per constituency, named "Practice station … (not real)") to try everything and rehearse. It also adds a <b>practice candidate for every party</b> in each constituency (plus a practice independent in three), so you can rehearse count night and watch the map change colour. <b>Add the parties first.</b> Remove all of it before the real list and real candidates go in.</p>
         <div class="row"><button class="btn" id="prLoad">Load practice stations</button><button class="btn ghost warn" id="prClear">Remove practice stations</button></div></div>
     </div>
     <div class="grid" style="align-content:start">
@@ -910,8 +910,8 @@ async function viewAdmin() {
   $("#aGo").onclick = () => guard(async () => { if (!$("#aParty").value) throw new Error("Add the party first (box above)."); const who = $("#aLabel").value.trim(), pn = $("#aParty").selectedOptions[0].textContent;
     const code = await API.createInvite({ role: "party_admin", party: $("#aParty").value, label: who }); invOut(code, who ? `${who} (${pn})` : pn, `the Party administrator for ${pn}`); $("#aLabel").value = ""; load(); });
   $("#sysInv").onclick = () => guard(async () => { const code = await API.createInvite({ role: "sys_admin", label: "System administrator" }); invOut(code, "", "a System administrator"); load(); });
-  $("#prLoad").onclick = () => guard(async () => { const n = await API.loadPracticeStations(); load(); toast(`${n} practice stations ready (2 per constituency, marked "not real").`); });
-  $("#prClear").onclick = () => confirm("Remove all practice stations? Invites to them are cancelled and people assigned to them lose that station. Accounts stay.") && guard(async () => { await API.clearPracticeStations(); load(); }, "Practice stations removed.");
+  $("#prLoad").onclick = () => guard(async () => { const n = await API.loadPracticeStations(); load(); toast(`${n} practice stations and practice candidates ready (all marked "not real").`); });
+  $("#prClear").onclick = () => confirm("Remove all practice stations and practice candidates? Invites to them are cancelled and people assigned to them lose that station. Accounts stay.") && guard(async () => { await API.clearPracticeStations(); load(); }, "Practice stations and candidates removed.");
   $("#tmpl").onclick = () => csv("polling-stations-template.csv", [["constituency", "polling_district", "district_code", "station_code", "station_name", "electors_listed"], ["Roseau North", "Example district", "", "EXAMPLE-01", "Example station name", "500"]]);
   $("#csvFile").onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return; const rows = parseCSV(await f.text());
