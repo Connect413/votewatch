@@ -66,15 +66,28 @@ const PARTY_PRESETS = [
 const JOBS = { inside: { short: "inside: live count", long: "INSIDE the station: tap +1 for every person who votes" },
   outside: { short: "outside: our supporters", long: "OUTSIDE the station: tap +1 for every supporter of ours you recognise going in" },
   both: { short: "inside + outside", long: "live count of all voters AND our supporters" } };
-// One clear "send it" panel for every invite: WhatsApp, text message or copy, and what happens next
+// One clear "send it" panel for every invite: WhatsApp, email, text message or copy, and what happens next
 function inviteSent(el, { code, msg, who }) {
   const enc = encodeURIComponent(msg);
   el.innerHTML = `<div class="sendbox" data-code="${esc(code)}"><div><b>✅ Invite ready for ${esc(who)}.</b> Now send it to them:</div>
     <div class="sendrow"><a class="btn wa" href="https://wa.me/?text=${enc}" target="_blank" rel="noopener">📲 Send by WhatsApp</a>
+      <button class="btn ghost" type="button" data-mail>✉️ Send by email</button>
       <a class="btn ghost" href="sms:?&body=${enc}">💬 Send by text</a><button class="btn ghost" type="button" data-copy>📋 Copy</button></div>
+    <div class="mailrow hide"><label class="f">Their email address</label><div class="row"><input class="inp" type="email" data-to placeholder="name@example.com" autocomplete="off"><button class="btn" type="button" data-mailgo>Open email</button></div>
+      <p class="small muted" style="margin:4px 0 0">This opens your email with the invite already written. Check it, then press Send. Ask them to look in their spam folder if it doesn't arrive.</p></div>
     <ol class="small steps"><li>They tap the link on their phone.</li><li>They type their name, email and a password.</li><li>That's it: they're in, already set to the right place.</li></ol>
     <p class="small muted" style="margin:0">The invite works once, for 14 days (code ${esc(code)}). Sent it to the wrong person, or made a mistake? Press <b>Cancel invite</b> in the list and make a new one.</p></div>`;
   el.querySelector("[data-copy]").onclick = () => (navigator.clipboard ? navigator.clipboard.writeText(msg) : Promise.reject()).then(() => toast("Copied. Paste it into WhatsApp or a text message."), () => toast("Could not copy here. Use the WhatsApp button instead.", true));
+  const mr = el.querySelector(".mailrow"), to = el.querySelector("[data-to]");
+  el.querySelector("[data-mail]").onclick = () => { mr.classList.remove("hide"); to.focus(); };
+  el.querySelector("[data-mailgo]").onclick = () => {
+    const addr = to.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)) return toast("Type their email address first, like name@gmail.com.", true);
+    const subj = "Your invitation to Vote Watch Dominica", mobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (mobile) location.href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subj)}&body=${enc}`;
+    else window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(addr)}&su=${encodeURIComponent(subj)}&body=${enc}`, "_blank", "noopener");
+    toast("Your email is open with the invite written. Press Send there.");
+  };
   el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 const inviteMsg = (name, what, link) => `${name ? "Hello " + name + ", y" : "Y"}ou are invited to Vote Watch Dominica as ${what}.\n\nTap this link to join:\n${link}\n\nThis link is for you only. Please don't forward it.`;
