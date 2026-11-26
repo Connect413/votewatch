@@ -34,7 +34,11 @@
     async session() { return !!(await sb.auth.getSession()).data.session; },
     async signIn(email, password) { ok(await sb.auth.signInWithPassword({ email, password })); },
     async signUp(email, password) {
-      const d = ok(await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }));
+      const r = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
+      if (r.error && /already (been )?registered|already exists/i.test(r.error.message || "")) return { exists: true };
+      const d = ok(r);
+      // Supabase answers a sign-up for an email that already has an account with a stand-in user (no identities) and sends no email
+      if (!d.session && d.user && Array.isArray(d.user.identities) && d.user.identities.length === 0) return { exists: true };
       return { needsConfirm: !d.session };
     },
     async resetPassword(email) { ok(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname })); },

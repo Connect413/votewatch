@@ -285,7 +285,8 @@ function authScreen(mode) {
       if (!code || name.length < 2 || !email || pw.length < 10) throw new Error("Fill in every field (password at least 10 characters).");
       localStorage.setItem("vw_invite", code); localStorage.setItem("vw_name", name);
       const r = await API.signUp(email, pw);
-      if (r.needsConfirm) { M.innerHTML = `<div class="auth"><div class="card"><h2>Check your email</h2><p>We sent a confirmation link to <b>${esc(email)}</b>. Open it, then sign in here. Your invite code is remembered on this device.</p><button class="btn" onclick="location.reload()">Go to sign in</button></div></div>`; return; }
+      if (r.exists) { authScreen("login"); $("#email").value = email; $("#authNote").innerHTML = `<div class="receipt" style="margin-top:0;margin-bottom:12px"><b>This email already has a Vote Watch account,</b> so no new email was sent. Sign in with that account's password. Your invite <b>${esc(code)}</b> is remembered and is added right after you sign in. Forgot the password? Press <b>Forgot password?</b> below, or use a different email.</div>`; return; }
+      if (r.needsConfirm) { M.innerHTML = `<div class="auth"><div class="card"><h2>Check your email</h2><p>We sent a confirmation link to <b>${esc(email)}</b> from <b>Vote Watch Dominica</b>. Open it, then sign in here with the password you just made. Your invite code is remembered on this device.</p><p class="small muted">Nothing after 5 minutes? Look in the spam or promotions folder.</p><button class="btn" onclick="location.reload()">Go to sign in</button></div></div>`; return; }
       await API.redeem(code, name); localStorage.removeItem("vw_invite"); history.replaceState(null, "", location.pathname); boot();
     } catch (e) { $("#authErr").innerHTML = authErr(friendlyAuthError(e)); throw e; } });
     return;
@@ -296,7 +297,7 @@ function authScreen(mode) {
     return;
   }
   M.innerHTML = `<div class="auth"><div class="card"><h2>Sign in</h2><p class="muted small">Authorised party representatives, watch rooms and head offices only.</p>
-    <label class="f">Email</label><input class="inp" id="email" type="email" autocomplete="username">
+    <div id="authNote"></div><label class="f">Email</label><input class="inp" id="email" type="email" autocomplete="username">
     <label class="f">Password</label><input class="inp" id="pw" type="password" autocomplete="current-password">
     <button class="btn big" style="margin-top:16px" id="go">Sign in</button>
     <div id="authErr" role="alert" aria-live="assertive"></div>
